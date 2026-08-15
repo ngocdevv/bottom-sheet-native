@@ -4,8 +4,6 @@ A React Native / Expo bottom sheet with a **native Swift + Kotlin engine**. Over
 
 The example catalog mirrors Cardtrace sheets (confirm, emoji, folders, forms, persistent scan).
 
-![Confirm sheet with native overlay](./example/screenshots/qa/ios-overlay-confirm.png)
-
 ## Contents
 
 - [Install](#install)
