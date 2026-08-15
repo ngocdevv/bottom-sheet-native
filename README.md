@@ -9,6 +9,9 @@ The example catalog mirrors Cardtrace sheets (confirm, emoji, folders, forms, pe
 ## Contents
 
 - [Install](#install)
+  - [From GitHub (not on npm yet)](#from-github-not-on-npm-yet)
+  - [From a local clone](#from-a-local-clone)
+  - [After install](#after-install)
 - [Concepts](#concepts)
 - [Quick start](#quick-start)
 - [Detents](#detents)
@@ -30,13 +33,74 @@ The example catalog mirrors Cardtrace sheets (confirm, emoji, folders, forms, pe
 
 ## Install
 
-```sh
-npx expo install bottom-sheet-native
-```
+This package is **not published on npm** yet. Depend on the GitHub source (or a local clone) from your app’s `package.json`.
 
 Requires a **development build** (`npx expo run:ios` / `npx expo run:android`). **Expo Go cannot load** the native engine.
 
 Peers: `expo`, `react`, `react-native`. Targeted at Expo SDK 57.
+
+### From GitHub (not on npm yet)
+
+In the **app** `package.json`:
+
+```json
+{
+  "dependencies": {
+    "bottom-sheet-native": "github:ngocdevv/bottom-sheet-native"
+  }
+}
+```
+
+Pin a commit (or `main`) if you want a frozen snapshot:
+
+```json
+{
+  "dependencies": {
+    "bottom-sheet-native": "github:ngocdevv/bottom-sheet-native#main"
+  }
+}
+```
+
+Then install:
+
+```sh
+npm install
+# or
+npx expo install github:ngocdevv/bottom-sheet-native
+```
+
+`npm` / `expo install` clones the repo and runs the package `prepare` script (`tsc` → `build/`). Expo autolinking picks up `expo-module.config.json`.
+
+HTTPS form (same package):
+
+```json
+"bottom-sheet-native": "git+https://github.com/ngocdevv/bottom-sheet-native.git"
+```
+
+### From a local clone
+
+If the module lives next to the app:
+
+```json
+{
+  "dependencies": {
+    "bottom-sheet-native": "file:../bottom-sheet-native"
+  }
+}
+```
+
+```sh
+cd /path/to/your-app
+npm install
+```
+
+Build the module once if `prepare` did not run:
+
+```sh
+cd ../bottom-sheet-native && npm install && npm run build
+```
+
+### After install
 
 Wrap the app **once** at the root:
 
@@ -49,6 +113,15 @@ export default function App() {
 ```
 
 `ModalBottomSheet` requires `BottomSheetProvider` (it portals the sheet to the root). Missing the provider throws.
+
+Rebuild native — Metro reload is not enough:
+
+```sh
+npx expo run:ios
+npx expo run:android
+```
+
+On Android, pass the **AVD name** (`Pixel_9_Pro`), not the adb serial (`emulator-5554`).
 
 ## Concepts
 
