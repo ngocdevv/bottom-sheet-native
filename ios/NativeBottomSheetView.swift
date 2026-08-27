@@ -49,7 +49,11 @@ final class NativeBottomSheetView: ExpoView, BottomSheetHostingViewDelegate {
     didChangePosition position: CGFloat,
     index: CGFloat
   ) {
-    onPositionChange(["position": position, "index": index])
+    onPositionChange([
+      "position": position,
+      "index": index,
+      "timestamp": CACurrentMediaTime() * 1_000,
+    ])
   }
 
   func bottomSheetHostingView(_ view: BottomSheetHostingView, didChangeKeyboardHeight height: CGFloat) {

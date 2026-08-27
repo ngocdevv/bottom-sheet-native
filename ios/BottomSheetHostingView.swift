@@ -118,14 +118,40 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   var scrollableExpandNegotiation = ScrollableNegotiationLevel.handoff.rawValue
   var scrollableCollapseNegotiation = ScrollableNegotiationLevel.initial.rawValue
   var animateIn = true
-  var animateContentHeight = true
+  var animateContentHeight = true {
+    didSet {
+      guard animateContentHeight != oldValue else { return }
+      reconcileNativeContentHeightTracking()
+    }
+  }
+  var positionEventsEnabled = false {
+    didSet {
+      guard positionEventsEnabled != oldValue, activeSpring != nil else { return }
+      if positionEventsEnabled {
+        startDisplayLink()
+      } else {
+        stopDisplayLink()
+      }
+    }
+  }
+  var dragEnabled = true {
+    didSet {
+      guard dragEnabled != oldValue else { return }
+      panGesture?.isEnabled = dragEnabled
+    }
+  }
   var hasSurface = false
   var jsContentHeight: CGFloat = 0 {
     didSet {
-      if abs(jsContentHeight - oldValue) > 0.5 {
-        refreshDetentsFromLayout()
-        setNeedsLayout()
+      reconcileNativeContentHeightTracking()
+      guard abs(jsContentHeight - oldValue) > 0.5 else { return }
+      if shouldDeferContentHeightRefresh {
+        scheduleDeferredContentHeightRefresh()
+        return
       }
+      cancelDeferredContentHeightRefresh()
+      refreshDetentsFromLayout()
+      setNeedsLayout()
     }
   }
   var dismissible = true
@@ -133,6 +159,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   var keyboardBehavior = 0 {
     didSet {
       if keyboardBehavior != oldValue {
+        cancelDeferredContentHeightRefresh()
         refreshDetentsFromLayout()
         setNeedsLayout()
       }
@@ -140,12 +167,15 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   }
   private var keyboardInset: CGFloat = 0 {
     didSet {
-      guard abs(keyboardInset - oldValue) > 0.5 else { return }
-      eventDelegate?.bottomSheetHostingView(self, didChangeKeyboardHeight: keyboardInset)
-      if keyboardBehavior == 1 {
-        refreshDetentsFromLayout()
-        setNeedsLayout()
+      let changed = abs(keyboardInset - oldValue) > 0.5
+      if changed {
+        eventDelegate?.bottomSheetHostingView(self, didChangeKeyboardHeight: keyboardInset)
       }
+      guard keyboardBehavior == 1 else { return }
+      let hadDeferredContentHeight = cancelDeferredContentHeightRefresh()
+      guard changed || hadDeferredContentHeight else { return }
+      refreshDetentsFromLayout()
+      setNeedsLayout()
     }
   }
 
@@ -164,6 +194,18 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   private var activeSpringTargetIndex = 0
   private var activeSpringEmitsSettle = false
   private var displayLink: CADisplayLink?
+  /**
+   * Reads the mounted React Native content view on the main thread when JS has
+   * deliberately opted out of `onLayout` measurement. Reanimated page-height
+   * transitions therefore produce no per-frame JS event or React render.
+   */
+  private var nativeContentHeightDisplayLink: CADisplayLink?
+  private var lastTrackedNativeContentHeight: CGFloat = 0
+  private var lastObservedSheetEditorFocus = false
+  private var lastObservedSheetContainsEditor = false
+  private var deferredContentHeightDisplayLink: CADisplayLink?
+  private var deferredContentHeightFramesElapsed = 0
+  private var isContentHeightRefreshDeferred = false
   private var scrimOpacities: [CGFloat] = [1]
   private var scrimPinnedFull = false
   private var pinScrimToTarget = false
@@ -178,8 +220,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   private var scrollViewOwnsLowerBoundary = false
   private weak var surfaceTouchHandler: UIGestureRecognizer?
   private static let springAnimationKey = "bottomSheetSettle"
+  private static let scrimAnimationKey = "bottomSheetScrim"
   private static let flickThreshold: CGFloat = 600
   private static let springDuration: CFTimeInterval = 0.45
+  private static let contentHeightRefreshDelayFrames = 3
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -210,6 +254,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     panGesture.cancelsTouchesInView = true
     panGesture.delaysTouchesBegan = false
     panGesture.delaysTouchesEnded = false
+    panGesture.isEnabled = dragEnabled
     sheetContainer.addGestureRecognizer(panGesture)
 
     NotificationCenter.default.addObserver(
@@ -234,7 +279,12 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   override func didMoveToWindow() {
     super.didMoveToWindow()
     surfaceTouchHandler = nil
-    guard window != nil else { return }
+    guard window != nil else {
+      cancelDeferredContentHeightRefresh()
+      stopNativeContentHeightTracking()
+      return
+    }
+    reconcileNativeContentHeightTracking()
     refreshDetentsFromLayout()
     setNeedsLayout()
     var current: UIView? = superview
@@ -322,6 +372,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   func setDetents(_ raw: [RawDetentSpec]) {
     rawDetentSpecs = raw
+    lastTrackedNativeContentHeight = 0
+    reconcileNativeContentHeightTracking()
     refreshDetentsFromLayout()
   }
 
@@ -338,17 +390,131 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       return
     }
     guard newIndex < detentSpecs.count, newIndex != targetIndex else { return }
+    // A delayed content refresh belongs to the detent we are leaving. Letting
+    // it fire during this snap would cancel and restart the new animation.
+    cancelDeferredContentHeightRefresh()
     snapToIndex(newIndex, velocity: 0, emitIndexChange: false)
   }
 
   func mountChild(_ child: UIView, at index: Int) {
     let insertAt = min(max(index + 1, 1), sheetContainer.subviews.count)
     sheetContainer.insertSubview(child, at: insertAt)
+    lastTrackedNativeContentHeight = 0
+    reconcileNativeContentHeightTracking()
     setNeedsLayout()
   }
 
   func unmountChild(_ child: UIView) {
     child.removeFromSuperview()
+    lastTrackedNativeContentHeight = 0
+    reconcileNativeContentHeightTracking()
+    setNeedsLayout()
+  }
+
+  // MARK: - Content / keyboard coalescing
+
+  /// A page layout can land just before an editor focuses and the keyboard
+  /// frame notification arrives. Hold only that FIRST height update. Deferring
+  /// every update merely because `keyboardBehavior == extend` samples a 60fps
+  /// page animation every three frames and makes the sheet edge step at ~20fps.
+  private var shouldDeferContentHeightRefresh: Bool {
+    guard keyboardBehavior == 1, hasLaidOut, !isPanning else { return false }
+    guard rawDetentSpecs.indices.contains(targetIndex) else { return false }
+    guard rawDetentSpecs[targetIndex].kind == .content else { return false }
+
+    let editorFocused = containsFirstResponder(sheetContainer)
+    let containsEditor = containsTextEditor(sheetContainer)
+    let focusChanged = editorFocused != lastObservedSheetEditorFocus
+    let editorPresenceChanged = containsEditor != lastObservedSheetContainsEditor
+    lastObservedSheetEditorFocus = editorFocused
+    lastObservedSheetContainsEditor = containsEditor
+    let keyboardVisible = keyboardInset > 0.5
+    return (focusChanged && editorFocused != keyboardVisible)
+      || (editorPresenceChanged && containsEditor && !keyboardVisible)
+  }
+
+  private func containsFirstResponder(_ view: UIView) -> Bool {
+    if view.isFirstResponder { return true }
+    return view.subviews.contains(where: containsFirstResponder)
+  }
+
+  private func containsTextEditor(_ view: UIView) -> Bool {
+    if view is UITextInput { return true }
+    return view.subviews.contains(where: containsTextEditor)
+  }
+
+  private func scheduleDeferredContentHeightRefresh() {
+    isContentHeightRefreshDeferred = true
+    guard deferredContentHeightDisplayLink == nil else { return }
+    deferredContentHeightFramesElapsed = 0
+    let link = CADisplayLink(target: self, selector: #selector(handleDeferredContentHeightFrame))
+    link.add(to: .main, forMode: .common)
+    deferredContentHeightDisplayLink = link
+  }
+
+  @objc private func handleDeferredContentHeightFrame() {
+    deferredContentHeightFramesElapsed += 1
+    guard deferredContentHeightFramesElapsed >= Self.contentHeightRefreshDelayFrames else { return }
+    flushDeferredContentHeightRefresh()
+  }
+
+  @discardableResult
+  private func cancelDeferredContentHeightRefresh() -> Bool {
+    let wasDeferred = isContentHeightRefreshDeferred
+    isContentHeightRefreshDeferred = false
+    deferredContentHeightFramesElapsed = 0
+    deferredContentHeightDisplayLink?.invalidate()
+    deferredContentHeightDisplayLink = nil
+    return wasDeferred
+  }
+
+  private func flushDeferredContentHeightRefresh() {
+    guard cancelDeferredContentHeightRefresh() else { return }
+    refreshDetentsFromLayout()
+    setNeedsLayout()
+  }
+
+  // MARK: - Native content-height tracking
+
+  private var shouldTrackNativeContentHeight: Bool {
+    guard window != nil, jsContentHeight <= 0.5 else { return false }
+    return rawDetentSpecs.contains(where: { $0.kind == .content })
+  }
+
+  private func reconcileNativeContentHeightTracking() {
+    if shouldTrackNativeContentHeight {
+      startNativeContentHeightTracking()
+    } else {
+      stopNativeContentHeightTracking()
+    }
+  }
+
+  private func startNativeContentHeightTracking() {
+    guard nativeContentHeightDisplayLink == nil else { return }
+    let link = CADisplayLink(target: self, selector: #selector(handleNativeContentHeightFrame))
+    // Do not cap this observer at 60: on a ProMotion device the Reanimated
+    // layout producer can run at 120Hz, and the sheet edge must consume every
+    // presented height rather than every other one.
+    link.add(to: .main, forMode: .common)
+    nativeContentHeightDisplayLink = link
+  }
+
+  private func stopNativeContentHeightTracking() {
+    nativeContentHeightDisplayLink?.invalidate()
+    nativeContentHeightDisplayLink = nil
+    lastTrackedNativeContentHeight = 0
+  }
+
+  @objc private func handleNativeContentHeightFrame() {
+    guard shouldTrackNativeContentHeight else {
+      stopNativeContentHeightTracking()
+      return
+    }
+    let measured = measuredNativeContentHeight()
+    guard measured > 0.5 else { return }
+    guard abs(measured - lastTrackedNativeContentHeight) > 0.5 else { return }
+    lastTrackedNativeContentHeight = measured
+    refreshDetentsFromLayout()
     setNeedsLayout()
   }
 
@@ -376,8 +542,9 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   private func measuredNativeContentHeight() -> CGFloat {
     let children = sheetChildren()
+    let contentChildren = hasSurface ? children.dropFirst() : children[...]
     var maxBottom: CGFloat = 0
-    for child in children {
+    for child in contentChildren {
       maxBottom = max(maxBottom, child.frame.maxY)
     }
     return maxBottom
@@ -439,6 +606,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   private func refreshDetentsFromLayout() {
     if hasLaidOut, window == nil { return }
+    if isContentHeightRefreshDeferred {
+      updateScrim()
+      return
+    }
     guard let resolved = resolveDetentSpecs() else {
       updateScrim()
       return
@@ -458,6 +629,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       let newMaxHeight = sheetContainerHeight
       let targetTy = translationY(for: targetIndex)
       if activeSpring != nil {
+        let shouldPinScrim = scrimIsAtTargetOpacity(for: targetIndex)
         let shouldEmitSettle = activeSpringEmitsSettle
         let visualTy = cancelActiveSpring()
         let visibleHeight = previousMaxHeight - visualTy
@@ -469,7 +641,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
           velocity: 0,
           emitIndexChange: false,
           emitSettle: shouldEmitSettle,
-          preserveScrimPin: true
+          preserveScrimPin: shouldPinScrim
         )
       } else {
         let currentVisibleHeight = previousMaxHeight - currentTranslationY
@@ -481,10 +653,15 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
           pinScrimToTarget = false
           scrimPinnedFull = false
         } else {
-          pinScrimToTarget = true
+          let shouldPinScrim = scrimIsAtTargetOpacity(for: targetIndex)
           let startTy = min(max(newMaxHeight - currentVisibleHeight, 0), newMaxHeight)
           sheetContainer.transform = CGAffineTransform(translationX: 0, y: startTy)
-          snapToIndex(targetIndex, velocity: 0, emitIndexChange: false, preserveScrimPin: true)
+          snapToIndex(
+            targetIndex,
+            velocity: 0,
+            emitIndexChange: false,
+            preserveScrimPin: shouldPinScrim
+          )
         }
       }
     }
@@ -591,8 +768,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
     let animation = CAKeyframeAnimation(keyPath: "transform.translation.y")
     let sampleCount = max(Int((Self.springDuration * 120).rounded()), 1)
-    animation.values = spring.keyframeValues(count: sampleCount)
-    animation.keyTimes = (0 ... sampleCount).map { NSNumber(value: Double($0) / Double(sampleCount)) }
+    let translationValues = spring.keyframeValues(count: sampleCount)
+    let keyTimes = (0 ... sampleCount).map { NSNumber(value: Double($0) / Double(sampleCount)) }
+    animation.values = translationValues
+    animation.keyTimes = keyTimes
     animation.duration = Self.springDuration
     animation.calculationMode = .linear
     animation.beginTime = sheetContainer.layer.convertTime(startTime, from: nil)
@@ -602,6 +781,12 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
     sheetContainer.transform = CGAffineTransform(translationX: 0, y: targetTy)
     sheetContainer.layer.add(animation, forKey: Self.springAnimationKey)
+    animateScrim(
+      translationValues: translationValues,
+      keyTimes: keyTimes,
+      beginTime: animation.beginTime,
+      duration: animation.duration
+    )
     activeSpring = spring
     startDisplayLink()
 
@@ -623,6 +808,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     activeSpringEmitsSettle = false
     stopDisplayLink()
     sheetContainer.layer.removeAnimation(forKey: Self.springAnimationKey)
+    scrimView.layer.removeAnimation(forKey: Self.scrimAnimationKey)
     sheetContainer.transform = CGAffineTransform(translationX: 0, y: translationY(for: index))
     emitPosition()
     pinScrimToTarget = false
@@ -635,17 +821,31 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   @discardableResult
   private func cancelActiveSpring() -> CGFloat {
     let visualTy = currentTranslationY
+    let visualScrimAlpha = currentScrimAlpha
     activeSpring = nil
     activeSpringEmitsSettle = false
     stopDisplayLink()
     sheetContainer.layer.removeAnimation(forKey: Self.springAnimationKey)
+    scrimView.layer.removeAnimation(forKey: Self.scrimAnimationKey)
     sheetContainer.transform = CGAffineTransform(translationX: 0, y: visualTy)
+    scrimView.alpha = visualScrimAlpha
+    scrimView.isHidden = visualScrimAlpha <= 0.001
     return visualTy
   }
 
   private func startDisplayLink() {
     stopDisplayLink()
+    guard positionEventsEnabled else { return }
     let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink))
+    if #available(iOS 15.0, *) {
+      // Position events are an opt-in observation stream, not the animation
+      // driver. Sampling them at a stable 60 Hz avoids doubling bridge work on
+      // ProMotion displays while Core Animation remains free to composite at
+      // the display's native refresh rate.
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+    } else {
+      link.preferredFramesPerSecond = 60
+    }
     link.add(to: .main, forMode: .common)
     displayLink = link
   }
@@ -671,6 +871,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     case .began:
       if activeSpring != nil { cancelActiveSpring() }
       isPanning = true
+      flushDeferredContentHeightRefresh()
       scrimPinnedFull = false
       panStartingIndex = targetIndex
       activeDragDetentSpecs = detentSpecs
@@ -882,7 +1083,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   }
 
   private var isScrimVisible: Bool {
-    modal && scrimView.alpha > 0.01 && !scrimView.isHidden
+    modal && currentScrimAlpha > 0.01 && !scrimView.isHidden
   }
 
   private var closedIndex: Int? {
@@ -926,6 +1127,50 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     scrimView.isHidden = alpha <= 0.001
   }
 
+  private var currentScrimAlpha: CGFloat {
+    (scrimView.layer.presentation()?.opacity).map(CGFloat.init) ?? scrimView.alpha
+  }
+
+  private func animateScrim(
+    translationValues: [CGFloat],
+    keyTimes: [NSNumber],
+    beginTime: CFTimeInterval,
+    duration: CFTimeInterval
+  ) {
+    guard modal else {
+      scrimView.layer.removeAnimation(forKey: Self.scrimAnimationKey)
+      scrimView.alpha = 0
+      scrimView.isHidden = true
+      return
+    }
+    let opacityValues = translationValues.map { scrimOpacity(forTranslationY: $0) }
+    let startAlpha = opacityValues.first ?? currentScrimAlpha
+    let targetAlpha = opacityValues.last ?? scrimOpacity(at: targetIndex)
+    scrimView.isHidden = startAlpha <= 0.001 && targetAlpha <= 0.001
+    scrimView.alpha = targetAlpha
+
+    let animation = CAKeyframeAnimation(keyPath: "opacity")
+    animation.values = opacityValues
+    animation.keyTimes = keyTimes
+    animation.duration = duration
+    animation.calculationMode = .linear
+    animation.beginTime = beginTime
+    animation.isRemovedOnCompletion = false
+    animation.fillMode = .forwards
+    scrimView.layer.add(animation, forKey: Self.scrimAnimationKey)
+  }
+
+  private func scrimOpacity(forTranslationY translationY: CGFloat) -> CGFloat {
+    if pinScrimToTarget || scrimPinnedFull {
+      return scrimOpacity(at: targetIndex)
+    }
+    return interpolatedScrimOpacity(forHeight: sheetContainerHeight - translationY)
+  }
+
+  private func scrimIsAtTargetOpacity(for index: Int) -> Bool {
+    abs(currentScrimAlpha - scrimOpacity(at: index)) <= 0.001
+  }
+
   private func scrimOpacity(at index: Int) -> CGFloat {
     if scrimOpacities.isEmpty { return 1 }
     let clamped = min(max(index, 0), scrimOpacities.count - 1)
@@ -933,7 +1178,11 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   }
 
   private func interpolatedScrimOpacity() -> CGFloat {
-    let fraction = fractionalIndex(for: currentSheetHeight)
+    interpolatedScrimOpacity(forHeight: currentSheetHeight)
+  }
+
+  private func interpolatedScrimOpacity(forHeight height: CGFloat) -> CGFloat {
+    let fraction = fractionalIndex(for: height)
     if scrimOpacities.isEmpty { return 1 }
     if scrimOpacities.count == 1 { return min(1, max(0, scrimOpacities[0])) }
     let maxIndex = CGFloat(scrimOpacities.count - 1)
@@ -964,12 +1213,17 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     let ty = overrideTy ?? currentTranslationY
     let position = sheetContainerHeight - ty
     let index = fractionalIndex(for: position)
-    eventDelegate?.bottomSheetHostingView(self, didChangePosition: position, index: index)
-    updateScrim()
+    if positionEventsEnabled {
+      eventDelegate?.bottomSheetHostingView(self, didChangePosition: position, index: index)
+    }
+    if activeSpring == nil {
+      updateScrim()
+    }
   }
 
   deinit {
     NotificationCenter.default.removeObserver(self)
+    cancelDeferredContentHeightRefresh()
     stopDisplayLink()
   }
 }

@@ -1,5 +1,11 @@
 import type { ReactNode } from 'react';
-import type { ColorValue, NativeSyntheticEvent, ProcessedColorValue, StyleProp, ViewStyle } from 'react-native';
+import type {
+  ColorValue,
+  NativeSyntheticEvent,
+  ProcessedColorValue,
+  StyleProp,
+  ViewStyle,
+} from 'react-native';
 
 import type { NormalizedDetent } from './bottomSheetUtils';
 
@@ -15,6 +21,8 @@ export type PositionChangeEventData = Readonly<{
    * as the sheet moves between them.
    */
   index: number;
+  /** Native monotonic timestamp, in milliseconds, for motion diagnostics. */
+  timestamp: number;
 }>;
 
 export type KeyboardChangeEventData = Readonly<{
@@ -29,6 +37,7 @@ export type NativeBottomSheetViewProps = {
   index: number;
   animateIn?: boolean;
   animateContentHeight?: boolean;
+  dragEnabled?: boolean;
   extendUnderStatusBar?: boolean;
   modal?: boolean;
   nativeOverlay?: boolean;
@@ -46,6 +55,8 @@ export type NativeBottomSheetViewProps = {
   onSettle?: (event: NativeSyntheticEvent<IndexEventData>) => void;
   onPositionChange?: (event: NativeSyntheticEvent<PositionChangeEventData>) => void;
   onKeyboardChange?: (event: NativeSyntheticEvent<KeyboardChangeEventData>) => void;
+  /** Internal: avoids dispatching a native event every frame when no JS listener exists. */
+  positionEventsEnabled?: boolean;
   style?: StyleProp<ViewStyle>;
   pointerEvents?: 'auto' | 'none' | 'box-none' | 'box-only';
   children?: ReactNode;

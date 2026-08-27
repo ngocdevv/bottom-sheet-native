@@ -123,10 +123,10 @@ On Android, pass the **AVD name** (`Pixel_9_Pro`), not the adb serial (`emulator
 
 ## Concepts
 
-| Layer | Owns | Does not own |
-| --- | --- | --- |
-| Native (Swift / Kotlin) | Overlay/scrim, detents, spring, sheet drag, IME insets, corner clip | Handle, lists, forms, buttons |
-| JS | Controlled `index`, chrome, content, page stack | Drawing dim with a JS `Pressable` / portal overlay |
+| Layer                   | Owns                                                                | Does not own                                       |
+| ----------------------- | ------------------------------------------------------------------- | -------------------------------------------------- |
+| Native (Swift / Kotlin) | Overlay/scrim, detents, spring, sheet drag, IME insets, corner clip | Handle, lists, forms, buttons                      |
+| JS                      | Controlled `index`, chrome, content, page stack                     | Drawing dim with a JS `Pressable` / portal overlay |
 
 `index` is always **controlled**. Native fires `onIndexChange` when the user snaps; you must `setIndex`. Close the sheet by moving `index` to the closed detent (`0` when the first detent is `0`).
 
@@ -153,8 +153,7 @@ function Example() {
         onIndexChange={setIndex}
         scrimColor="rgba(0,0,0,0.45)"
         sheetBackgroundColor="#fff"
-        sheetCornerRadius={28}
-      >
+        sheetCornerRadius={28}>
         <SheetHandle />
         <SheetHeader title="Hello" onClose={() => setIndex(0)} />
         <View style={{ padding: 16 }}>
@@ -172,13 +171,13 @@ Open: `setIndex(1)`. Close: `setIndex(0)`, or tap the scrim / drag down when `di
 
 `detents` is an array of snap heights in **ascending** order. Each entry:
 
-| Value | Meaning |
-| --- | --- |
-| `0` | Closed (height 0). Usually first. |
-| `168` / `300` | Absolute points (iOS pt; JS dp, converted to px on Android). |
-| `` `'90%'` `` | Percent of the host’s usable height. |
-| `'content'` | JS content height (`onLayout`), capped at usable height. |
-| `programmatic(value)` | Reachable only via `index` — **not** drag or scrim tap. |
+| Value                 | Meaning                                                      |
+| --------------------- | ------------------------------------------------------------ |
+| `0`                   | Closed (height 0). Usually first.                            |
+| `168` / `300`         | Absolute points (iOS pt; JS dp, converted to px on Android). |
+| `` `'90%'` ``         | Percent of the host’s usable height.                         |
+| `'content'`           | Measured content height, capped at usable height.            |
+| `programmatic(value)` | Reachable only via `index` — **not** drag or scrim tap.      |
 
 ```tsx
 import { programmatic } from 'bottom-sheet-native';
@@ -245,31 +244,30 @@ iOS clips `sheetContainer`; Android uses `clipToOutline` on the container. **Reb
 
 There is no Gorhom-style `enableDynamicSizing` flag. Declare a `'content'` detent:
 
-1. JS measures children with `onLayout` → `contentHeight`.
-2. Native height = `min(contentHeight + keyboardExtend, maxHeight)`.
-3. Height changes while parked on `'content'` animate when `animateContentHeight` is `true` (default).
+1. With `animateContentHeight={true}` (default), JS reports discrete layout changes and native animates the sheet spring.
+2. With `animateContentHeight={false}`, native tracks the mounted content view every display frame. This is the mode for a Reanimated page viewport that already owns the height animation: no per-frame `onLayout`, React render, or JS-to-native prop update occurs.
+3. Native height is capped to `min(contentHeight + keyboardExtend, maxHeight)`.
 
 Content taller than the screen is **clipped**. Add a `%` detent or an inner `ScrollView`.
 
-A transient `contentHeight` of `0` while swapping children is **not** sent to native (avoids treating the sheet as closed).
+A transient JS `contentHeight` of `0` while swapping children is **not** treated as closed; native falls back to the mounted content view.
 
 ## Keyboard
 
 `keyboardBehavior`:
 
-| Value | Behavior |
-| --- | --- |
-| `'none'` | SWM default. Ignore IME. |
-| `'extend'` | Add IME height to a `'content'` detent (Wanted card, Offer). |
-| `'stick'` | Keep the detent. Emit `onKeyboardChange`. Pin search/footer with `SheetDock` or `useKeyboardInset()` (Add cards, Emoji). |
+| Value      | Behavior                                                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `'none'`   | SWM default. Ignore IME.                                                                                                 |
+| `'extend'` | Add IME height to a `'content'` detent (Wanted card, Offer).                                                             |
+| `'stick'`  | Keep the detent. Emit `onKeyboardChange`. Pin search/footer with `SheetDock` or `useKeyboardInset()` (Add cards, Emoji). |
 
 ```tsx
 <ModalBottomSheet
   detents={[0, 'content']}
   keyboardBehavior="extend"
   index={index}
-  onIndexChange={setIndex}
->
+  onIndexChange={setIndex}>
   <TextInput placeholder="Notes" />
 </ModalBottomSheet>
 ```
@@ -317,11 +315,18 @@ Default `{ expand: 'handoff', collapse: 'initial' }`.
 
 `disableScrollableNegotiation` (deprecated) equals `'none'`.
 
+Set `dragEnabled={false}` while a child interaction (crop, camera framing,
+drawing) must own every pan on the sheet surface. Re-enable it when that page
+no longer owns the gesture.
+
 There is **no** drag-and-drop to reorder items. Dragging an item scrolls the list or moves the sheet.
 
 ## Nested pages
 
-One sheet, multiple pages. Height follows `'content'` + `animateContentHeight`.
+One sheet, multiple pages. If the page viewport animates its own height, pass
+`animateContentHeight={false}` so the native edge follows that UI-thread layout
+directly. Otherwise leave the default on and let native animate discrete page
+height changes.
 
 ```tsx
 import { useSheetStack, SheetFooter } from 'bottom-sheet-native';
@@ -338,15 +343,16 @@ function FolderColor({ open, onClose }: { open: boolean; onClose: () => void }) 
           stack.reset();
           onClose();
         }
-      }}
-    >
+      }}>
       {stack.page === 'list' ? (
         <Pressable onPress={() => stack.push('custom')}>
           <Text>Pick custom colour</Text>
         </Pressable>
       ) : (
         <SheetFooter onBack={stack.pop}>
-          <Pressable onPress={onClose}><Text>Select colour</Text></Pressable>
+          <Pressable onPress={onClose}>
+            <Text>Select colour</Text>
+          </Pressable>
         </SheetFooter>
       )}
     </ModalBottomSheet>
@@ -360,13 +366,13 @@ function FolderColor({ open, onClose }: { open: boolean; onClose: () => void }) 
 
 Product UI is JS. Native only owns motion.
 
-| Component | Role |
-| --- | --- |
-| `SheetHandle` | Drag pill at the top edge. |
-| `SheetHeader` | Centered title, close (`onClose`), optional `accessory`. |
-| `SheetFooter` | Bottom row: `onBack` (‹) + `children` (usually a CTA). |
-| `SheetDock` | `paddingBottom` = IME. Use with `keyboardBehavior="stick"`. |
-| `HoldToConfirmButton` | Hold for `holdMs` (default 900) before `onConfirm`. |
+| Component             | Role                                                        |
+| --------------------- | ----------------------------------------------------------- |
+| `SheetHandle`         | Drag pill at the top edge.                                  |
+| `SheetHeader`         | Centered title, close (`onClose`), optional `accessory`.    |
+| `SheetFooter`         | Bottom row: `onBack` (‹) + `children` (usually a CTA).      |
+| `SheetDock`           | `paddingBottom` = IME. Use with `keyboardBehavior="stick"`. |
+| `HoldToConfirmButton` | Hold for `holdMs` (default 900) before `onConfirm`.         |
 
 ```tsx
 <HoldToConfirmButton label="Hold to confirm" onConfirm={onClose} holdMs={900} />
@@ -376,52 +382,56 @@ Product UI is JS. Native only owns motion.
 
 ## Events
 
-| Event | When |
-| --- | --- |
-| `onIndexChange(index)` | User **started** a snap (drag, flick, scrim). **Not** fired for your `setIndex`. Update state here. |
-| `onSettle(index)` | Snap **finished**, including programmatic. |
-| `onPositionChange({ nativeEvent: { position, index } })` | Every frame. `position` is pt from the bottom; `index` is a fractional detent. |
-| `onKeyboardChange(height)` | IME overlap in pt/dp. |
+| Event                                                               | When                                                                                                                                                                                |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onIndexChange(index)`                                              | User **started** a snap (drag, flick, scrim). **Not** fired for your `setIndex`. Update state here.                                                                                 |
+| `onSettle(index)`                                                   | Snap **finished**, including programmatic.                                                                                                                                          |
+| `onPositionChange({ nativeEvent: { position, index, timestamp } })` | Opt-in frame-sampled observation stream while a sheet moves. `position` is pt from the bottom, `index` is a fractional detent, and `timestamp` is a monotonic time in milliseconds. |
+| `onKeyboardChange(height)`                                          | IME overlap in pt/dp.                                                                                                                                                               |
 
-Pass `wrapNativeView={Animated.createAnimatedComponent}` to handle `onPositionChange` on the UI thread.
+No per-frame position event is produced when `onPositionChange` is omitted. This
+keeps the normal animation path off the JS bridge. Pass
+`wrapNativeView={Animated.createAnimatedComponent}` when a consumer needs to
+handle the optional stream on the UI thread.
 
 ## API
 
 ### `ModalBottomSheet` / `BottomSheet`
 
-| Prop | Default | Notes |
-| --- | --- | --- |
-| `children` | — | Content. Height from `onLayout`. |
-| `index` | **required** | Current detent. |
-| `detents` | `[0, 'content']` | See [Detents](#detents). |
-| `onIndexChange` | — | User-driven snap. |
-| `onSettle` | — | Snap finished. |
-| `onPositionChange` | — | Per frame. |
-| `animateIn` | `true` | Animate from closed on first layout. |
-| `animateContentHeight` | `true` | Animate when the active `'content'` height changes. |
-| `extendUnderStatusBar` | `false` | Allow full-height detents under the status bar. |
-| `dismissible` | `true` | `false` blocks drag/scrim to 0. |
-| `keyboardBehavior` | `'none'` | `'none'` / `'extend'` / `'stick'`. |
-| `onKeyboardChange` | — | IME height. |
-| `sheetBackgroundColor` | — | Fill. Prefer `#fff` / `rgba`. |
-| `sheetCornerRadius` | `28` | Top corners only. |
-| `surface` | — | Custom background instead of the built-in fill. |
-| `scrollableNegotiation` | `{ expand: 'handoff', collapse: 'initial' }` | See above. |
-| `style` | — | Host style (rarely needed with the modal portal). |
-| `wrapNativeView` | — | Wrap the native view (Reanimated). |
+| Prop                    | Default                                      | Notes                                                                                                                                                  |
+| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `children`              | —                                            | Content. JS-measured by default; native frame-tracked when `animateContentHeight={false}`.                                                             |
+| `index`                 | **required**                                 | Current detent.                                                                                                                                        |
+| `detents`               | `[0, 'content']`                             | See [Detents](#detents).                                                                                                                               |
+| `onIndexChange`         | —                                            | User-driven snap.                                                                                                                                      |
+| `onSettle`              | —                                            | Snap finished.                                                                                                                                         |
+| `onPositionChange`      | —                                            | Opt-in frame-sampled position stream; omit it to avoid per-frame bridge traffic.                                                                       |
+| `animateIn`             | `true`                                       | Animate from closed on first layout.                                                                                                                   |
+| `animateContentHeight`  | `true`                                       | Native spring for discrete height changes. Set `false` when a UI-thread viewport already animates height; native follows it without per-frame JS work. |
+| `extendUnderStatusBar`  | `false`                                      | Allow full-height detents under the status bar.                                                                                                        |
+| `dismissible`           | `true`                                       | `false` blocks drag/scrim to 0.                                                                                                                        |
+| `dragEnabled`           | `true`                                       | Temporarily disable the native sheet pan while an interactive child owns the gesture.                                                                  |
+| `keyboardBehavior`      | `'none'`                                     | `'none'` / `'extend'` / `'stick'`.                                                                                                                     |
+| `onKeyboardChange`      | —                                            | IME height.                                                                                                                                            |
+| `sheetBackgroundColor`  | —                                            | Fill. Prefer `#fff` / `rgba`.                                                                                                                          |
+| `sheetCornerRadius`     | `28`                                         | Top corners only.                                                                                                                                      |
+| `surface`               | —                                            | Custom background instead of the built-in fill.                                                                                                        |
+| `scrollableNegotiation` | `{ expand: 'handoff', collapse: 'initial' }` | See above.                                                                                                                                             |
+| `style`                 | —                                            | Host style (rarely needed with the modal portal).                                                                                                      |
+| `wrapNativeView`        | —                                            | Wrap the native view (Reanimated).                                                                                                                     |
 
 Modal only:
 
-| Prop | Default | Notes |
-| --- | --- | --- |
-| `scrimColor` | `rgba(0,0,0,0.45)` on `ModalBottomSheet` | Overlay color. |
-| `scrimOpacities` | closed = 0, open = 1 | One 0–1 value per detent. |
-| `nativeOverlay` | `false` | Skip the portal. Not a system window/dialog. |
+| Prop             | Default                                  | Notes                                        |
+| ---------------- | ---------------------------------------- | -------------------------------------------- |
+| `scrimColor`     | `rgba(0,0,0,0.45)` on `ModalBottomSheet` | Overlay color.                               |
+| `scrimOpacities` | closed = 0, open = 1                     | One 0–1 value per detent.                    |
+| `nativeOverlay`  | `false`                                  | Skip the portal. Not a system window/dialog. |
 
 ### `programmatic(value)`
 
 ```ts
-programmatic(300) // { value: 300, programmatic: true }
+programmatic(300); // { value: 300, programmatic: true }
 ```
 
 ### `useKeyboardInset(): number`
@@ -436,17 +446,17 @@ The Expo native view. Prefer `BottomSheet` / `ModalBottomSheet` instead of using
 
 ## Native engine
 
-| Concern | Implementation |
-| --- | --- |
-| Snap | Critically damped spring, ζ = 1, 0.45s, ω = 8 / duration |
-| Flick | ±600 pt/s |
-| `'content'` | JS `onLayout` (dp) → iOS pt / Android px |
-| IME | iOS keyboard frame; Android `WindowInsetsCompat.Type.ime()` |
-| Nav inset | Android `Type.navigationBars()` — not double-counted with `systemWindowInsetBottom` |
-| Scroll | iOS `UIScrollView` pin + handoff; Android nested-scroll intercept |
-| Scrim | Native full-host view, interpolated `scrimOpacities` |
-| Corners | Clip the container, top corners only |
-| Touches when closed | Host `dispatchTouchEvent` returns false when height ≈ 0 |
+| Concern             | Implementation                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| Snap                | Critically damped spring, ζ = 1, 0.45s, ω = 8 / duration                            |
+| Flick               | ±600 pt/s                                                                           |
+| `'content'`         | JS `onLayout` (dp) → iOS pt / Android px                                            |
+| IME                 | iOS keyboard frame; Android `WindowInsetsCompat.Type.ime()`                         |
+| Nav inset           | Android `Type.navigationBars()` — not double-counted with `systemWindowInsetBottom` |
+| Scroll              | iOS `UIScrollView` pin + handoff; Android nested-scroll intercept                   |
+| Scrim               | Native full-host view, interpolated `scrimOpacities`                                |
+| Corners             | Clip the container, top corners only                                                |
+| Touches when closed | Host `dispatchTouchEvent` returns false when height ≈ 0                             |
 
 ## Limits
 

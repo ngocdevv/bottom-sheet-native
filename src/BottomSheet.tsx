@@ -1,5 +1,13 @@
-import { useCallback, useState, type ComponentType, type ReactNode } from 'react';
 import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from 'react';
+import {
+  Platform,
   StyleSheet,
   View,
   processColor,
@@ -22,6 +30,7 @@ import {
   isNormalizedDetentClosed,
   KEYBOARD_BEHAVIOR_LEVEL,
   normalizeDetent,
+  shouldMeasureContentHeightInJS,
   validateIndex,
 } from './bottomSheetUtils';
 
@@ -70,7 +79,14 @@ export interface BottomSheetProps {
   detents?: Detent[];
   index: number;
   animateIn?: boolean;
+  /**
+   * Native spring for discrete content-height changes. Set false when a
+   * UI-thread/Reanimated viewport already animates its own height; the native
+   * engine then tracks the mounted content frame without per-frame JS work.
+   */
   animateContentHeight?: boolean;
+  /** Enables the native sheet pan gesture. Disable while child gestures own the surface. */
+  dragEnabled?: boolean;
   extendUnderStatusBar?: boolean;
   onIndexChange?: (index: number) => void;
   onSettle?: (index: number) => void;
@@ -116,6 +132,7 @@ export const BottomSheet = (props: BottomSheetProps) => {
     index,
     animateIn = true,
     animateContentHeight = true,
+    dragEnabled = true,
     extendUnderStatusBar = false,
     onIndexChange,
     onSettle,
@@ -153,9 +170,10 @@ export const BottomSheet = (props: BottomSheetProps) => {
   const selectedNormalizedDetent = normalizedDetents[index]!;
   const isSheetClosed = isNormalizedDetentClosed(selectedNormalizedDetent);
   const resolvedScrimOpacities =
-    scrimOpacities ??
-    normalizedDetents.map((detent) => (isNormalizedDetentClosed(detent) ? 0 : 1));
-  const resolvedScrimColor = cssOverlayColor(scrimColor ?? (modal ? DEFAULT_MODAL_SCRIM : undefined));
+    scrimOpacities ?? normalizedDetents.map((detent) => (isNormalizedDetentClosed(detent) ? 0 : 1));
+  const resolvedScrimColor = cssOverlayColor(
+    scrimColor ?? (modal ? DEFAULT_MODAL_SCRIM : undefined)
+  );
 
   const handleIndexChange = useCallback(
     (event: NativeSyntheticEvent<{ index: number }>) => {
@@ -184,6 +202,34 @@ export const BottomSheet = (props: BottomSheetProps) => {
   );
 
   const [contentHeight, setContentHeight] = useState(0);
+  const contentWrapperRef = useRef<View>(null);
+  const measureContentHeightInJS = shouldMeasureContentHeightInJS(
+    Platform.OS,
+    animateContentHeight
+  );
+  const updateContentHeight = useCallback((next: number) => {
+    setContentHeight((current) => {
+      if (next < 1 && current > 1) return current;
+      return Math.abs(current - next) < 0.5 ? current : next;
+    });
+  }, []);
+  const handleContentLayout = useCallback(
+    (event: { nativeEvent: { layout: { height: number } } }) => {
+      updateContentHeight(event.nativeEvent.layout.height);
+    },
+    [updateContentHeight]
+  );
+
+  // `animateContentHeight` is normally static, but re-measure once if a caller
+  // switches back to native-owned animation after using the UI-thread tracking
+  // mode. Attaching onLayout alone does not guarantee a new event when the
+  // content's geometry is already settled.
+  useEffect(() => {
+    if (!measureContentHeightInJS) return;
+    contentWrapperRef.current?.measure((_x, _y, _width, height) => {
+      updateContentHeight(height);
+    });
+  }, [measureContentHeightInJS, updateContentHeight]);
   const resolvedCornerRadius = sheetCornerRadius ?? 28;
 
   const sheet = (
@@ -193,9 +239,13 @@ export const BottomSheet = (props: BottomSheetProps) => {
       <NativeView
         animateContentHeight={animateContentHeight}
         animateIn={animateIn}
-        contentHeight={contentHeight}
+        // UI-thread page-height animations must not round-trip through
+        // onLayout -> React state -> a native prop on every frame. A zero value
+        // asks the native engine to track the mounted content view directly.
+        contentHeight={measureContentHeightInJS ? contentHeight : 0}
         detents={normalizedDetents}
         dismissible={dismissible}
+        dragEnabled={dragEnabled}
         extendUnderStatusBar={extendUnderStatusBar}
         hasSurface={surface != null || sheetBackgroundColor != null}
         index={index}
@@ -207,11 +257,10 @@ export const BottomSheet = (props: BottomSheetProps) => {
         onPositionChange={onPositionChange}
         onSettle={handleSettle}
         pointerEvents={modal ? (isSheetClosed ? 'none' : 'auto') : 'box-none'}
+        positionEventsEnabled={onPositionChange != null}
         scrimColor={
           (processColor(resolvedScrimColor ?? DEFAULT_MODAL_SCRIM) as
-            | string
-            | number
-            | undefined) ?? undefined
+            string | number | undefined) ?? undefined
         }
         scrimOpacities={resolvedScrimOpacities}
         scrollableCollapseNegotiation={SCROLLABLE_NEGOTIATION_LEVEL[resolvedCollapseNegotiation]}
@@ -229,7 +278,14 @@ export const BottomSheet = (props: BottomSheetProps) => {
           <View
             collapsable={false}
             pointerEvents="box-none"
-            style={[StyleSheet.absoluteFill, styles.sheetClip, { borderTopLeftRadius: resolvedCornerRadius, borderTopRightRadius: resolvedCornerRadius }]}>
+            style={[
+              StyleSheet.absoluteFill,
+              styles.sheetClip,
+              {
+                borderTopLeftRadius: resolvedCornerRadius,
+                borderTopRightRadius: resolvedCornerRadius,
+              },
+            ]}>
             {surface}
           </View>
         ) : sheetBackgroundColor != null ? (
@@ -248,14 +304,9 @@ export const BottomSheet = (props: BottomSheetProps) => {
           />
         ) : null}
         <View
+          ref={contentWrapperRef}
           collapsable={false}
-          onLayout={(event) => {
-            const next = event.nativeEvent.layout.height;
-            setContentHeight((current) => {
-              if (next < 1 && current > 1) return current;
-              return Math.abs(current - next) < 0.5 ? current : next;
-            });
-          }}
+          onLayout={measureContentHeightInJS ? handleContentLayout : undefined}
           style={styles.contentWrapper}>
           {children}
         </View>
