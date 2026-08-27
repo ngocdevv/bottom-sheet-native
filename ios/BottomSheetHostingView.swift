@@ -195,6 +195,14 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   private var scrimOpacities: [CGFloat] = [1]
   private var scrimPinnedFull = false
   private var pinScrimToTarget = false
+  // A content detent can resolve to its measured height after an entrance
+  // spring has already started. Re-anchoring preserves the panel's visible
+  // height; this correction preserves the scrim's presentation alpha too,
+  // then blends back onto the newly resolved detent curve as the spring
+  // approaches its target.
+  private var scrimContinuityOffset: CGFloat = 0
+  private var scrimContinuityStartTy: CGFloat = 0
+  private var scrimContinuityTargetTy: CGFloat = 0
   private var panStartingIndex: Int?
   private var activeDragRange: (minTy: CGFloat, maxTy: CGFloat)?
   private var activeDragDetentSpecs: [DetentSpec]?
@@ -569,6 +577,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
         let shouldPinScrim = scrimIsAtTargetOpacity(for: targetIndex)
         let shouldEmitSettle = activeSpringEmitsSettle
         let springVelocity = activeSpring?.velocity(at: CACurrentMediaTime()) ?? 0
+        let visualScrimAlpha = currentScrimAlpha
         let visualTy = cancelActiveSpring()
         let visibleHeight = previousMaxHeight - visualTy
         let reanchoredTy = min(max(newMaxHeight - visibleHeight, 0), newMaxHeight)
@@ -580,7 +589,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
           emitIndexChange: false,
           emitSettle: shouldEmitSettle,
           preserveScrimPin: shouldPinScrim,
-          preserveVelocity: true
+          preserveVelocity: true,
+          preservedScrimAlpha: visualScrimAlpha
         )
       } else {
         let currentVisibleHeight = previousMaxHeight - currentTranslationY
@@ -677,9 +687,11 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     emitIndexChange: Bool = true,
     emitSettle: Bool = true,
     preserveScrimPin: Bool = false,
-    preserveVelocity: Bool = false
+    preserveVelocity: Bool = false,
+    preservedScrimAlpha: CGFloat? = nil
   ) {
     guard detentSpecs.indices.contains(index) else { return }
+    let carriedScrimAlpha = preservedScrimAlpha ?? currentScrimAlpha
     targetIndex = index
     if preserveScrimPin {
       pinScrimToTarget = true
@@ -732,7 +744,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       translationValues: translationValues,
       keyTimes: keyTimes,
       beginTime: animation.beginTime,
-      duration: animation.duration
+      duration: animation.duration,
+      preservedStartAlpha: carriedScrimAlpha
     )
     activeSpring = spring
     startDisplayLink()
@@ -757,9 +770,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     sheetContainer.layer.removeAnimation(forKey: Self.springAnimationKey)
     scrimView.layer.removeAnimation(forKey: Self.scrimAnimationKey)
     sheetContainer.transform = CGAffineTransform(translationX: 0, y: translationY(for: index))
-    emitPosition()
     pinScrimToTarget = false
     scrimPinnedFull = false
+    clearScrimContinuity()
+    emitPosition()
     if emitSettle {
       eventDelegate?.bottomSheetHostingView(self, didSettle: index)
     }
@@ -1061,6 +1075,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     guard modal else {
       scrimView.alpha = 0
       scrimView.isHidden = true
+      clearScrimContinuity()
       return
     }
     if pinScrimToTarget || scrimPinnedFull {
@@ -1069,7 +1084,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       scrimView.isHidden = pinned <= 0.001
       return
     }
-    let alpha = interpolatedScrimOpacity()
+    let alpha = continuousScrimOpacity(
+      mappedAlpha: interpolatedScrimOpacity(),
+      translationY: currentTranslationY
+    )
     scrimView.alpha = alpha
     scrimView.isHidden = alpha <= 0.001
   }
@@ -1082,16 +1100,32 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     translationValues: [CGFloat],
     keyTimes: [NSNumber],
     beginTime: CFTimeInterval,
-    duration: CFTimeInterval
+    duration: CFTimeInterval,
+    preservedStartAlpha: CGFloat
   ) {
     guard modal else {
       scrimView.layer.removeAnimation(forKey: Self.scrimAnimationKey)
       scrimView.alpha = 0
       scrimView.isHidden = true
+      clearScrimContinuity()
       return
     }
-    let opacityValues = translationValues.map { scrimOpacity(forTranslationY: $0) }
-    let startAlpha = opacityValues.first ?? currentScrimAlpha
+    let mappedOpacityValues = translationValues.map { scrimOpacity(forTranslationY: $0) }
+    let mappedStartAlpha = mappedOpacityValues.first ?? currentScrimAlpha
+    configureScrimContinuity(
+      startTranslationY: translationValues.first ?? currentTranslationY,
+      targetTranslationY: translationValues.last ?? translationY(for: targetIndex),
+      mappedStartAlpha: mappedStartAlpha,
+      preservedStartAlpha: preservedStartAlpha
+    )
+    let opacityValues = mappedOpacityValues.enumerated().map { offset, mappedAlpha in
+      continuousScrimOpacity(
+        mappedAlpha: mappedAlpha,
+        translationY: translationValues[offset],
+        fallbackProgress: CGFloat(keyTimes[offset].doubleValue)
+      )
+    }
+    let startAlpha = opacityValues.first ?? preservedStartAlpha
     let targetAlpha = opacityValues.last ?? scrimOpacity(at: targetIndex)
     scrimView.isHidden = startAlpha <= 0.001 && targetAlpha <= 0.001
     scrimView.alpha = targetAlpha
@@ -1105,6 +1139,38 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     animation.isRemovedOnCompletion = false
     animation.fillMode = .forwards
     scrimView.layer.add(animation, forKey: Self.scrimAnimationKey)
+  }
+
+  private func configureScrimContinuity(
+    startTranslationY: CGFloat,
+    targetTranslationY: CGFloat,
+    mappedStartAlpha: CGFloat,
+    preservedStartAlpha: CGFloat
+  ) {
+    scrimContinuityStartTy = startTranslationY
+    scrimContinuityTargetTy = targetTranslationY
+    scrimContinuityOffset = min(1, max(0, preservedStartAlpha)) - mappedStartAlpha
+  }
+
+  private func continuousScrimOpacity(
+    mappedAlpha: CGFloat,
+    translationY: CGFloat,
+    fallbackProgress: CGFloat = 0
+  ) -> CGFloat {
+    let distance = scrimContinuityTargetTy - scrimContinuityStartTy
+    let progress: CGFloat
+    if abs(distance) > 0.5 {
+      progress = min(1, max(0, (translationY - scrimContinuityStartTy) / distance))
+    } else {
+      progress = min(1, max(0, fallbackProgress))
+    }
+    return min(1, max(0, mappedAlpha + scrimContinuityOffset * (1 - progress)))
+  }
+
+  private func clearScrimContinuity() {
+    scrimContinuityOffset = 0
+    scrimContinuityStartTy = 0
+    scrimContinuityTargetTy = 0
   }
 
   private func scrimOpacity(forTranslationY translationY: CGFloat) -> CGFloat {
