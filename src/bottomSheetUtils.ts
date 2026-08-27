@@ -6,6 +6,8 @@ export type DetentValue = number | `${number}%` | 'content';
 
 export type Detent = DetentValue | { value: DetentValue; programmatic?: boolean };
 
+export type ContentHeightAnimation = 'spring' | 'none';
+
 export type NormalizedDetent = Readonly<{
   value: number;
   kind: 'points' | 'percentage' | 'content';
@@ -110,6 +112,12 @@ export const validateIndex = (index: number, detentCount: number) => {
   }
 };
 
+/** Resolve the named API while preserving the deprecated boolean alias. */
+export const resolveContentHeightAnimation = (
+  animation: ContentHeightAnimation | undefined,
+  legacyAnimate: boolean | undefined
+): boolean => (animation != null ? animation === 'spring' : (legacyAnimate ?? true));
+
 /** Native iOS/Android flick threshold, in points (or dp) per second. */
 export const SNAP_FLICK_THRESHOLD = 600;
 
@@ -165,10 +173,31 @@ export const resolveDetentHeights = (
   maxHeight: number,
   contentHeight: number | null,
   keyboardExtend = 0
-): number[] =>
-  detents.map((detent, index) =>
-    resolveDetentHeight(detent, index, detents, maxHeight, contentHeight, keyboardExtend)
-  );
+): number[] => {
+  const resolved: number[] = [];
+  for (const [index, detent] of detents.entries()) {
+    let height = resolveDetentHeight(
+      detent,
+      index,
+      detents,
+      maxHeight,
+      contentHeight,
+      keyboardExtend
+    );
+
+    // A dynamic detent is bounded by its neighbours. Without this clamp,
+    // content growth (including keyboard extension) can make detents descend,
+    // which leaves native engines with an invalid/stale detent array.
+    if (detent.kind === 'content') {
+      const lowerBound = resolved[resolved.length - 1] ?? 0;
+      const upperBound = Math.max(lowerBound, unresolvedContentFallback(index, detents, maxHeight));
+      height = Math.min(Math.max(height, lowerBound), upperBound);
+    }
+
+    resolved.push(height);
+  }
+  return resolved;
+};
 
 export type KeyboardBehavior = 'none' | 'extend' | 'stick';
 
@@ -275,16 +304,8 @@ export const fractionalIndexForHeight = (
   return last;
 };
 
-/**
- * Native sheets can read their mounted child's frame directly when the caller
- * already owns the height animation. Keeping `onLayout` attached in that mode
- * would send one event and one React state update per animation frame.
- *
- * Web has no native host to measure from, so it always keeps the JS fallback.
- */
-export const shouldMeasureContentHeightInJS = (
-  platform: string,
-  animateContentHeight: boolean
-): boolean => platform === 'web' || animateContentHeight;
+/** Only sheets with a dynamic detent need content layout measurement. */
+export const hasContentDetent = (detents: readonly NormalizedDetent[]): boolean =>
+  detents.some((detent) => detent.kind === 'content');
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));

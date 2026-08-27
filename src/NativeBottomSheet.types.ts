@@ -45,6 +45,7 @@ export type NativeBottomSheetViewProps = {
   scrollableCollapseNegotiation?: number;
   scrimColor?: ColorValue | ProcessedColorValue | null;
   scrimOpacities?: readonly number[];
+  /** Discrete measured height in dp. A negative value means not measured yet. */
   contentHeight?: number;
   hasSurface?: boolean;
   sheetBackgroundColor?: ColorValue | ProcessedColorValue | null;

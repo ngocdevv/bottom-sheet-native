@@ -2,12 +2,13 @@ import {
   applyDismissible,
   bestSnapIndex,
   fractionalIndexForHeight,
+  hasContentDetent,
   interpolateScrimOpacity,
   isNormalizedDetentClosed,
   normalizeDetent,
   programmatic,
+  resolveContentHeightAnimation,
   resolveDetentHeights,
-  shouldMeasureContentHeightInJS,
   validateIndex,
 } from '../bottomSheetUtils';
 
@@ -64,6 +65,11 @@ describe('resolveDetentHeights', () => {
   it('falls back when content height is unknown', () => {
     const detents = [0, 'content', '50%'].map(normalizeDetent);
     expect(resolveDetentHeights(detents, 800, null)).toEqual([0, 400, 400]);
+  });
+
+  it('keeps a measured empty content layout distinct from an unknown height', () => {
+    const detents = [0, 'content', '50%'].map(normalizeDetent);
+    expect(resolveDetentHeights(detents, 800, 0)).toEqual([0, 0, 400]);
   });
 });
 
@@ -130,7 +136,13 @@ describe('keyboard extend + dismissible', () => {
     const detents = [0, 'content', '80%'].map(normalizeDetent);
     expect(resolveDetentHeights(detents, 800, 240, 0)).toEqual([0, 240, 640]);
     expect(resolveDetentHeights(detents, 800, 240, 200)).toEqual([0, 440, 640]);
-    expect(resolveDetentHeights(detents, 800, 240, 700)).toEqual([0, 800, 640]);
+    expect(resolveDetentHeights(detents, 800, 240, 700)).toEqual([0, 640, 640]);
+  });
+
+  it('clamps content between its preceding and following detents', () => {
+    const detents = [300, 'content', '80%'].map(normalizeDetent);
+    expect(resolveDetentHeights(detents, 800, 120)).toEqual([300, 300, 640]);
+    expect(resolveDetentHeights(detents, 800, 900)).toEqual([300, 640, 640]);
   });
 
   it('marks a closed detent programmatic when the sheet is not dismissible', () => {
@@ -144,14 +156,15 @@ describe('keyboard extend + dismissible', () => {
 });
 
 describe('content-height measurement ownership', () => {
-  it('keeps UI-thread-driven native height animations off the JS bridge', () => {
-    expect(shouldMeasureContentHeightInJS('ios', false)).toBe(false);
-    expect(shouldMeasureContentHeightInJS('android', false)).toBe(false);
+  it('measures only when the detent array contains content', () => {
+    expect(hasContentDetent([0, '40%'].map(normalizeDetent))).toBe(false);
+    expect(hasContentDetent([0, 'content'].map(normalizeDetent))).toBe(true);
   });
 
-  it('keeps JS measurement for native-owned springs and web', () => {
-    expect(shouldMeasureContentHeightInJS('ios', true)).toBe(true);
-    expect(shouldMeasureContentHeightInJS('android', true)).toBe(true);
-    expect(shouldMeasureContentHeightInJS('web', false)).toBe(true);
+  it('defaults to spring and lets the named API override the deprecated alias', () => {
+    expect(resolveContentHeightAnimation(undefined, undefined)).toBe(true);
+    expect(resolveContentHeightAnimation(undefined, false)).toBe(false);
+    expect(resolveContentHeightAnimation('spring', false)).toBe(true);
+    expect(resolveContentHeightAnimation('none', true)).toBe(false);
   });
 });

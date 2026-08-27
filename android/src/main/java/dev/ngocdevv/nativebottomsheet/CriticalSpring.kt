@@ -9,13 +9,19 @@ internal class CriticalSpring(
   val target: Float,
   val v0: Float,
   val omega: Float,
-  val startTimeMs: Long,
   val durationMs: Long,
 ) {
-  fun valueAt(timeMs: Long): Float {
-    val t = max(0f, (timeMs - startTimeMs) / 1000f)
+  fun valueAtElapsed(elapsedSeconds: Float): Float {
+    val t = max(0f, elapsedSeconds)
     val a = from - target
     val decay = exp((-omega * t).toDouble()).toFloat()
     return target + decay * (a + (v0 + omega * a) * t)
+  }
+
+  fun velocityAtElapsed(elapsedSeconds: Float): Float {
+    val t = max(0f, elapsedSeconds)
+    val a = from - target
+    val b = v0 + omega * a
+    return exp((-omega * t).toDouble()).toFloat() * (v0 - omega * b * t)
   }
 }

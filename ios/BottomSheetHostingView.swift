@@ -118,12 +118,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   var scrollableExpandNegotiation = ScrollableNegotiationLevel.handoff.rawValue
   var scrollableCollapseNegotiation = ScrollableNegotiationLevel.initial.rawValue
   var animateIn = true
-  var animateContentHeight = true {
-    didSet {
-      guard animateContentHeight != oldValue else { return }
-      reconcileNativeContentHeightTracking()
-    }
-  }
+  var animateContentHeight = true
   var positionEventsEnabled = false {
     didSet {
       guard positionEventsEnabled != oldValue, activeSpring != nil else { return }
@@ -141,9 +136,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     }
   }
   var hasSurface = false
-  var jsContentHeight: CGFloat = 0 {
+  var jsContentHeight: CGFloat = -1 {
     didSet {
-      reconcileNativeContentHeightTracking()
       guard abs(jsContentHeight - oldValue) > 0.5 else { return }
       if shouldDeferContentHeightRefresh {
         scheduleDeferredContentHeightRefresh()
@@ -194,17 +188,9 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   private var activeSpringTargetIndex = 0
   private var activeSpringEmitsSettle = false
   private var displayLink: CADisplayLink?
-  /**
-   * Reads the mounted React Native content view on the main thread when JS has
-   * deliberately opted out of `onLayout` measurement. Reanimated page-height
-   * transitions therefore produce no per-frame JS event or React render.
-   */
-  private var nativeContentHeightDisplayLink: CADisplayLink?
-  private var lastTrackedNativeContentHeight: CGFloat = 0
   private var lastObservedSheetEditorFocus = false
   private var lastObservedSheetContainsEditor = false
-  private var deferredContentHeightDisplayLink: CADisplayLink?
-  private var deferredContentHeightFramesElapsed = 0
+  private var deferredContentHeightWorkItem: DispatchWorkItem?
   private var isContentHeightRefreshDeferred = false
   private var scrimOpacities: [CGFloat] = [1]
   private var scrimPinnedFull = false
@@ -223,7 +209,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   private static let scrimAnimationKey = "bottomSheetScrim"
   private static let flickThreshold: CGFloat = 600
   private static let springDuration: CFTimeInterval = 0.45
-  private static let contentHeightRefreshDelayFrames = 3
+  private static let contentHeightRefreshDelay: TimeInterval = 0.05
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -281,10 +267,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     surfaceTouchHandler = nil
     guard window != nil else {
       cancelDeferredContentHeightRefresh()
-      stopNativeContentHeightTracking()
       return
     }
-    reconcileNativeContentHeightTracking()
     refreshDetentsFromLayout()
     setNeedsLayout()
     var current: UIView? = superview
@@ -372,8 +356,6 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   func setDetents(_ raw: [RawDetentSpec]) {
     rawDetentSpecs = raw
-    lastTrackedNativeContentHeight = 0
-    reconcileNativeContentHeightTracking()
     refreshDetentsFromLayout()
   }
 
@@ -399,15 +381,11 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   func mountChild(_ child: UIView, at index: Int) {
     let insertAt = min(max(index + 1, 1), sheetContainer.subviews.count)
     sheetContainer.insertSubview(child, at: insertAt)
-    lastTrackedNativeContentHeight = 0
-    reconcileNativeContentHeightTracking()
     setNeedsLayout()
   }
 
   func unmountChild(_ child: UIView) {
     child.removeFromSuperview()
-    lastTrackedNativeContentHeight = 0
-    reconcileNativeContentHeightTracking()
     setNeedsLayout()
   }
 
@@ -445,75 +423,28 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   private func scheduleDeferredContentHeightRefresh() {
     isContentHeightRefreshDeferred = true
-    guard deferredContentHeightDisplayLink == nil else { return }
-    deferredContentHeightFramesElapsed = 0
-    let link = CADisplayLink(target: self, selector: #selector(handleDeferredContentHeightFrame))
-    link.add(to: .main, forMode: .common)
-    deferredContentHeightDisplayLink = link
-  }
-
-  @objc private func handleDeferredContentHeightFrame() {
-    deferredContentHeightFramesElapsed += 1
-    guard deferredContentHeightFramesElapsed >= Self.contentHeightRefreshDelayFrames else { return }
-    flushDeferredContentHeightRefresh()
+    guard deferredContentHeightWorkItem == nil else { return }
+    let workItem = DispatchWorkItem { [weak self] in
+      self?.flushDeferredContentHeightRefresh()
+    }
+    deferredContentHeightWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + Self.contentHeightRefreshDelay,
+      execute: workItem
+    )
   }
 
   @discardableResult
   private func cancelDeferredContentHeightRefresh() -> Bool {
     let wasDeferred = isContentHeightRefreshDeferred
     isContentHeightRefreshDeferred = false
-    deferredContentHeightFramesElapsed = 0
-    deferredContentHeightDisplayLink?.invalidate()
-    deferredContentHeightDisplayLink = nil
+    deferredContentHeightWorkItem?.cancel()
+    deferredContentHeightWorkItem = nil
     return wasDeferred
   }
 
   private func flushDeferredContentHeightRefresh() {
     guard cancelDeferredContentHeightRefresh() else { return }
-    refreshDetentsFromLayout()
-    setNeedsLayout()
-  }
-
-  // MARK: - Native content-height tracking
-
-  private var shouldTrackNativeContentHeight: Bool {
-    guard window != nil, jsContentHeight <= 0.5 else { return false }
-    return rawDetentSpecs.contains(where: { $0.kind == .content })
-  }
-
-  private func reconcileNativeContentHeightTracking() {
-    if shouldTrackNativeContentHeight {
-      startNativeContentHeightTracking()
-    } else {
-      stopNativeContentHeightTracking()
-    }
-  }
-
-  private func startNativeContentHeightTracking() {
-    guard nativeContentHeightDisplayLink == nil else { return }
-    let link = CADisplayLink(target: self, selector: #selector(handleNativeContentHeightFrame))
-    // Do not cap this observer at 60: on a ProMotion device the Reanimated
-    // layout producer can run at 120Hz, and the sheet edge must consume every
-    // presented height rather than every other one.
-    link.add(to: .main, forMode: .common)
-    nativeContentHeightDisplayLink = link
-  }
-
-  private func stopNativeContentHeightTracking() {
-    nativeContentHeightDisplayLink?.invalidate()
-    nativeContentHeightDisplayLink = nil
-    lastTrackedNativeContentHeight = 0
-  }
-
-  @objc private func handleNativeContentHeightFrame() {
-    guard shouldTrackNativeContentHeight else {
-      stopNativeContentHeightTracking()
-      return
-    }
-    let measured = measuredNativeContentHeight()
-    guard measured > 0.5 else { return }
-    guard abs(measured - lastTrackedNativeContentHeight) > 0.5 else { return }
-    lastTrackedNativeContentHeight = measured
     refreshDetentsFromLayout()
     setNeedsLayout()
   }
@@ -529,7 +460,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
 
   private var validContentHeight: CGFloat? {
     let raw: CGFloat?
-    if jsContentHeight > 0.5 {
+    if jsContentHeight >= 0 {
       raw = jsContentHeight
     } else {
       let measured = measuredNativeContentHeight()
@@ -578,7 +509,13 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       case .percentage:
         height = maxHeight * spec.value
       case .content:
-        height = measuredContentHeight ?? unresolvedContentDetentHeight(after: index, maxHeight: maxHeight)
+        let lowerBound = resolved.last?.height ?? 0
+        let upperBound = max(
+          lowerBound,
+          unresolvedContentDetentHeight(after: index, maxHeight: maxHeight)
+        )
+        let desired = measuredContentHeight ?? upperBound
+        height = min(max(desired, lowerBound), upperBound)
       }
       let resolvedHeight = min(max(0, height), maxHeight)
       if let previous = resolved.last, resolvedHeight < previous.height {
@@ -631,6 +568,7 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
       if activeSpring != nil {
         let shouldPinScrim = scrimIsAtTargetOpacity(for: targetIndex)
         let shouldEmitSettle = activeSpringEmitsSettle
+        let springVelocity = activeSpring?.velocity(at: CACurrentMediaTime()) ?? 0
         let visualTy = cancelActiveSpring()
         let visibleHeight = previousMaxHeight - visualTy
         let reanchoredTy = min(max(newMaxHeight - visibleHeight, 0), newMaxHeight)
@@ -638,10 +576,11 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
         emitPosition()
         snapToIndex(
           targetIndex,
-          velocity: 0,
+          velocity: springVelocity,
           emitIndexChange: false,
           emitSettle: shouldEmitSettle,
-          preserveScrimPin: shouldPinScrim
+          preserveScrimPin: shouldPinScrim,
+          preserveVelocity: true
         )
       } else {
         let currentVisibleHeight = previousMaxHeight - currentTranslationY
@@ -668,7 +607,9 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   }
 
   private func shouldAnimateContentHeight(at index: Int) -> Bool {
-    guard animateContentHeight, rawDetentSpecs.indices.contains(index) else { return false }
+    guard animateContentHeight,
+          !UIAccessibility.isReduceMotionEnabled,
+          rawDetentSpecs.indices.contains(index) else { return false }
     return rawDetentSpecs[index].kind == .content
   }
 
@@ -735,7 +676,8 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     velocity: CGFloat,
     emitIndexChange: Bool = true,
     emitSettle: Bool = true,
-    preserveScrimPin: Bool = false
+    preserveScrimPin: Bool = false,
+    preserveVelocity: Bool = false
   ) {
     guard detentSpecs.indices.contains(index) else { return }
     targetIndex = index
@@ -749,9 +691,14 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
     let currentTy = activeSpring != nil ? cancelActiveSpring() : sheetContainer.transform.ty
     let targetTy = translationY(for: index)
     let distance = targetTy - currentTy
-    let velocityRatio = distance != 0 ? velocity / distance : 0
-    let clampedRatio = min(max(velocityRatio, -5), 5)
-    let v0 = clampedRatio * distance
+    let v0: CGFloat
+    if preserveVelocity {
+      v0 = velocity
+    } else {
+      let velocityRatio = distance != 0 ? velocity / distance : 0
+      let clampedRatio = min(max(velocityRatio, -5), 5)
+      v0 = clampedRatio * distance
+    }
     let omega = 8.0 / CGFloat(Self.springDuration)
     activeSpringEmitsSettle = emitSettle
     activeSpringTargetIndex = index
