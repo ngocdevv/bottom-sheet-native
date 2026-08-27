@@ -7,6 +7,7 @@ import {
   normalizeDetent,
   programmatic,
   resolveDetentHeights,
+  shouldMeasureContentHeightInJS,
   validateIndex,
 } from '../bottomSheetUtils';
 
@@ -139,5 +140,18 @@ describe('keyboard extend + dismissible', () => {
     expect(locked[0]?.programmatic).toBe(true);
     expect(locked[1]?.programmatic).toBe(false);
     expect(locked[2]?.programmatic).toBe(false);
+  });
+});
+
+describe('content-height measurement ownership', () => {
+  it('keeps UI-thread-driven native height animations off the JS bridge', () => {
+    expect(shouldMeasureContentHeightInJS('ios', false)).toBe(false);
+    expect(shouldMeasureContentHeightInJS('android', false)).toBe(false);
+  });
+
+  it('keeps JS measurement for native-owned springs and web', () => {
+    expect(shouldMeasureContentHeightInJS('ios', true)).toBe(true);
+    expect(shouldMeasureContentHeightInJS('android', true)).toBe(true);
+    expect(shouldMeasureContentHeightInJS('web', false)).toBe(true);
   });
 });

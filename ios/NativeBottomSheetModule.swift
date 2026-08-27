@@ -23,6 +23,14 @@ public class NativeBottomSheetModule: Module {
         view.engine.animateContentHeight = value
       }
 
+      Prop("positionEventsEnabled") { (view: NativeBottomSheetView, value: Bool) in
+        view.engine.positionEventsEnabled = value
+      }
+
+      Prop("dragEnabled") { (view: NativeBottomSheetView, value: Bool) in
+        view.engine.dragEnabled = value
+      }
+
       Prop("extendUnderStatusBar") { (view: NativeBottomSheetView, value: Bool) in
         view.engine.extendUnderStatusBar = value
       }

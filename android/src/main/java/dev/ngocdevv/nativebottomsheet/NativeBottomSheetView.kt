@@ -97,7 +97,13 @@ class NativeBottomSheetView(context: Context, appContext: AppContext) :
   }
 
   override fun emitPositionChange(position: Float, index: Float) {
-    onPositionChange(mapOf("position" to position.toDouble(), "index" to index.toDouble()))
+    onPositionChange(
+      mapOf(
+        "position" to position.toDouble(),
+        "index" to index.toDouble(),
+        "timestamp" to android.os.SystemClock.uptimeMillis().toDouble(),
+      ),
+    )
   }
 
   override fun emitKeyboardChange(height: Float) {

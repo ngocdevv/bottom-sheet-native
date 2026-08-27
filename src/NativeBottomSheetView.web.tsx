@@ -75,6 +75,7 @@ export default function NativeBottomSheetView(props: WebProps) {
           const payload: PositionChangeEventData = {
             position: event.nativeEvent.layout.height,
             index,
+            timestamp: globalThis.performance?.now?.() ?? Date.now(),
           };
           onPositionChange?.({
             nativeEvent: payload,

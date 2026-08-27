@@ -17,6 +17,11 @@ if (SUBTARGETS.includes(args[0])) {
     args.push('--config', `${target}/jest.config.js`);
   }
   args.push(...restArgs);
+} else if (!args.includes('--config') && !args.includes('-c')) {
+  // This package intentionally keeps its transform details in jest.config.cjs.
+  // package.json also exposes Expo's preset metadata, so implicit Jest config
+  // discovery sees two configs and exits before running a single test.
+  args = ['--config', path.join(process.cwd(), 'jest.config.cjs'), ...args];
 }
 
 if (

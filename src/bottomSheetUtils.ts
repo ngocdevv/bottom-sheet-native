@@ -275,4 +275,16 @@ export const fractionalIndexForHeight = (
   return last;
 };
 
+/**
+ * Native sheets can read their mounted child's frame directly when the caller
+ * already owns the height animation. Keeping `onLayout` attached in that mode
+ * would send one event and one React state update per animation frame.
+ *
+ * Web has no native host to measure from, so it always keeps the JS fallback.
+ */
+export const shouldMeasureContentHeightInJS = (
+  platform: string,
+  animateContentHeight: boolean
+): boolean => platform === 'web' || animateContentHeight;
+
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));

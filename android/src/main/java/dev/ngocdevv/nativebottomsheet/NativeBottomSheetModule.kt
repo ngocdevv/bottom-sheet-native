@@ -44,6 +44,14 @@ class NativeBottomSheetModule : Module() {
       Prop("animateContentHeight") { view: NativeBottomSheetView, value: Boolean ->
         view.host.animateContentHeight = value
       }
+
+      Prop("positionEventsEnabled") { view: NativeBottomSheetView, value: Boolean ->
+        view.host.positionEventsEnabled = value
+      }
+
+      Prop("dragEnabled") { view: NativeBottomSheetView, value: Boolean ->
+        view.host.dragEnabled = value
+      }
       Prop("extendUnderStatusBar") { view: NativeBottomSheetView, value: Boolean ->
         view.host.extendUnderStatusBar = value
       }
