@@ -446,7 +446,6 @@ function SheetScaffold({
   detents = [0, 'content'],
   indexOverride,
   onIndexChange,
-  animateContentHeight = true,
   keyboardBehavior = 'none',
   dismissible = true,
   children,
@@ -457,7 +456,6 @@ function SheetScaffold({
   detents?: (number | 'content' | `${number}%`)[];
   indexOverride?: number;
   onIndexChange?: (index: number) => void;
-  animateContentHeight?: boolean;
   keyboardBehavior?: KeyboardBehavior;
   dismissible?: boolean;
   children: ReactNode;
@@ -465,7 +463,7 @@ function SheetScaffold({
   const index = indexOverride ?? (open ? 1 : 0);
   return (
     <ModalBottomSheet
-      animateContentHeight={animateContentHeight}
+      contentHeightAnimation="spring"
       detents={detents}
       dismissible={dismissible}
       index={open ? index : 0}
@@ -576,7 +574,6 @@ function CardsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
 
   return (
     <SheetScaffold
-      animateContentHeight={false}
       keyboardBehavior="stick"
       onClose={onClose}
       open={open}
@@ -742,7 +739,6 @@ function FormSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [exact, setExact] = useState(false);
   return (
     <SheetScaffold
-      animateContentHeight
       keyboardBehavior="extend"
       onClose={onClose}
       open={open}
@@ -786,7 +782,6 @@ function OfferSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [amount, setAmount] = useState('');
   return (
     <SheetScaffold
-      animateContentHeight
       keyboardBehavior="extend"
       onClose={onClose}
       open={open}

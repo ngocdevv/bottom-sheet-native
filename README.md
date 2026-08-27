@@ -244,13 +244,34 @@ iOS clips `sheetContainer`; Android uses `clipToOutline` on the container. **Reb
 
 There is no Gorhom-style `enableDynamicSizing` flag. Declare a `'content'` detent:
 
-1. With `animateContentHeight={true}` (default), JS reports discrete layout changes and native animates the sheet spring.
-2. With `animateContentHeight={false}`, native tracks the mounted content view every display frame. This is the mode for a Reanimated page viewport that already owns the height animation: no per-frame `onLayout`, React render, or JS-to-native prop update occurs.
-3. Native height is capped to `min(contentHeight + keyboardExtend, maxHeight)`.
+1. React Native reports a **discrete** layout height only when a `'content'` detent exists.
+2. Native retargets the sheet's `transform` spring without animating layout on every frame.
+3. Content is clamped between the preceding and following detents, then capped to the usable screen height.
+4. A spring that is retargeted mid-flight preserves its current position and velocity.
+
+```tsx
+<ModalBottomSheet
+  contentHeightAnimation="spring" // default; use "none" to snap
+  detents={[0, 'content', '90%']}
+  index={open ? 1 : 0}>
+  {page}
+</ModalBottomSheet>
+```
+
+`animateContentHeight` remains as a deprecated boolean alias. `false` now means
+the same as `contentHeightAnimation="none"`; it no longer enables continuous
+native frame polling.
+
+Do **not** animate the measured content wrapper's `height` with Reanimated. That
+turns a discrete layout change into a layout event on every display frame and
+creates two competing animation timelines. Render the destination layout, let
+the native sheet spring resize, and animate page content with `transform` and/or
+`opacity` when you need a visual transition.
 
 Content taller than the screen is **clipped**. Add a `%` detent or an inner `ScrollView`.
 
-A transient JS `contentHeight` of `0` while swapping children is **not** treated as closed; native falls back to the mounted content view.
+A one-frame `0` while swapping children is confirmed on the next frame before
+being applied. A stable, genuinely empty layout still resolves to height `0`.
 
 ## Keyboard
 
@@ -281,7 +302,7 @@ A transient JS `contentHeight` of `0` while swapping children is **not** treated
 </ModalBottomSheet>
 ```
 
-`useKeyboardInset()` returns keyboard height in pt/dp. Pair with `animateContentHeight={false}` if you animate padding yourself.
+`useKeyboardInset()` returns keyboard height in pt/dp for custom pinned/docked content.
 
 ## Non-dismissible sheets
 
@@ -323,10 +344,11 @@ There is **no** drag-and-drop to reorder items. Dragging an item scrolls the lis
 
 ## Nested pages
 
-One sheet, multiple pages. If the page viewport animates its own height, pass
-`animateContentHeight={false}` so the native edge follows that UI-thread layout
-directly. Otherwise leave the default on and let native animate discrete page
-height changes.
+One sheet, multiple pages. Switch to the destination page layout immediately and
+leave `contentHeightAnimation="spring"` on. The native edge follows the new
+discrete height with one transform spring. If the page itself needs motion, use
+a slide/cross-fade (`transform` / `opacity`) inside the sheet rather than an
+animated `height`.
 
 ```tsx
 import { useSheetStack, SheetFooter } from 'bottom-sheet-native';
@@ -398,27 +420,28 @@ handle the optional stream on the UI thread.
 
 ### `ModalBottomSheet` / `BottomSheet`
 
-| Prop                    | Default                                      | Notes                                                                                                                                                  |
-| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `children`              | —                                            | Content. JS-measured by default; native frame-tracked when `animateContentHeight={false}`.                                                             |
-| `index`                 | **required**                                 | Current detent.                                                                                                                                        |
-| `detents`               | `[0, 'content']`                             | See [Detents](#detents).                                                                                                                               |
-| `onIndexChange`         | —                                            | User-driven snap.                                                                                                                                      |
-| `onSettle`              | —                                            | Snap finished.                                                                                                                                         |
-| `onPositionChange`      | —                                            | Opt-in frame-sampled position stream; omit it to avoid per-frame bridge traffic.                                                                       |
-| `animateIn`             | `true`                                       | Animate from closed on first layout.                                                                                                                   |
-| `animateContentHeight`  | `true`                                       | Native spring for discrete height changes. Set `false` when a UI-thread viewport already animates height; native follows it without per-frame JS work. |
-| `extendUnderStatusBar`  | `false`                                      | Allow full-height detents under the status bar.                                                                                                        |
-| `dismissible`           | `true`                                       | `false` blocks drag/scrim to 0.                                                                                                                        |
-| `dragEnabled`           | `true`                                       | Temporarily disable the native sheet pan while an interactive child owns the gesture.                                                                  |
-| `keyboardBehavior`      | `'none'`                                     | `'none'` / `'extend'` / `'stick'`.                                                                                                                     |
-| `onKeyboardChange`      | —                                            | IME height.                                                                                                                                            |
-| `sheetBackgroundColor`  | —                                            | Fill. Prefer `#fff` / `rgba`.                                                                                                                          |
-| `sheetCornerRadius`     | `28`                                         | Top corners only.                                                                                                                                      |
-| `surface`               | —                                            | Custom background instead of the built-in fill.                                                                                                        |
-| `scrollableNegotiation` | `{ expand: 'handoff', collapse: 'initial' }` | See above.                                                                                                                                             |
-| `style`                 | —                                            | Host style (rarely needed with the modal portal).                                                                                                      |
-| `wrapNativeView`        | —                                            | Wrap the native view (Reanimated).                                                                                                                     |
+| Prop                     | Default                                      | Notes                                                                                              |
+| ------------------------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `children`               | —                                            | Content. Measured discretely only when `detents` contains `'content'`.                            |
+| `index`                  | **required**                                 | Current detent.                                                                                    |
+| `detents`                | `[0, 'content']`                             | See [Detents](#detents).                                                                           |
+| `onIndexChange`          | —                                            | User-driven snap.                                                                                  |
+| `onSettle`               | —                                            | Snap finished.                                                                                     |
+| `onPositionChange`       | —                                            | Opt-in frame-sampled position stream; omit it to avoid per-frame bridge traffic.                   |
+| `animateIn`              | `true`                                       | Animate from closed on first layout.                                                               |
+| `contentHeightAnimation` | `'spring'`                                   | Native transform spring for discrete content changes; `'none'` snaps.                             |
+| `animateContentHeight`   | `true`                                       | Deprecated boolean alias for `contentHeightAnimation`.                                             |
+| `extendUnderStatusBar`   | `false`                                      | Allow full-height detents under the status bar.                                                    |
+| `dismissible`            | `true`                                       | `false` blocks drag/scrim to 0.                                                                    |
+| `dragEnabled`            | `true`                                       | Temporarily disable the native sheet pan while an interactive child owns the gesture.              |
+| `keyboardBehavior`       | `'none'`                                     | `'none'` / `'extend'` / `'stick'`.                                                                 |
+| `onKeyboardChange`       | —                                            | IME height.                                                                                        |
+| `sheetBackgroundColor`   | —                                            | Fill. Prefer `#fff` / `rgba`.                                                                      |
+| `sheetCornerRadius`      | `28`                                         | Top corners only.                                                                                  |
+| `surface`                | —                                            | Custom background instead of the built-in fill.                                                    |
+| `scrollableNegotiation`  | `{ expand: 'handoff', collapse: 'initial' }` | See above.                                                                                         |
+| `style`                  | —                                            | Host style (rarely needed with the modal portal).                                                  |
+| `wrapNativeView`         | —                                            | Wrap the native view (Reanimated).                                                                 |
 
 Modal only:
 
@@ -449,6 +472,7 @@ The Expo native view. Prefer `BottomSheet` / `ModalBottomSheet` instead of using
 | Concern             | Implementation                                                                      |
 | ------------------- | ----------------------------------------------------------------------------------- |
 | Snap                | Critically damped spring, ζ = 1, 0.45s, ω = 8 / duration                            |
+| Frame pacing        | iOS Core Animation; Android system `ValueAnimator`; no layout polling loop          |
 | Flick               | ±600 pt/s                                                                           |
 | `'content'`         | JS `onLayout` (dp) → iOS pt / Android px                                            |
 | IME                 | iOS keyboard frame; Android `WindowInsetsCompat.Type.ime()`                         |

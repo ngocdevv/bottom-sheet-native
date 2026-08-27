@@ -3,7 +3,8 @@ import { Keyboard, Platform, type KeyboardEvent } from 'react-native';
 
 /**
  * Keyboard height that should be added as bottom padding on `'content'` sheets.
- * Pair with `animateContentHeight={false}` when you animate the padding yourself.
+ * If the padding changes discretely, the selected content detent follows it
+ * using `contentHeightAnimation`.
  */
 export function useKeyboardInset() {
   const [inset, setInset] = useState(0);

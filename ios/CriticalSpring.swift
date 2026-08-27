@@ -17,6 +17,13 @@ struct CriticalSpring {
     return target + decay * (a + (v0 + omega * a) * t)
   }
 
+  func velocity(at time: CFTimeInterval) -> CGFloat {
+    let t = CGFloat(max(0, time - startTime))
+    let a = from - target
+    let b = v0 + omega * a
+    return exp(-omega * t) * (v0 - omega * b * t)
+  }
+
   func keyframeValues(count: Int) -> [CGFloat] {
     let n = max(count, 1)
     return (0 ... n).map { i in

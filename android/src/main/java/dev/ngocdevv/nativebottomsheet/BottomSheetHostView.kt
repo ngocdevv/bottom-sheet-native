@@ -1,17 +1,19 @@
 package dev.ngocdevv.nativebottomsheet
 
 import android.annotation.SuppressLint
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.drawable.ColorDrawable
-import android.os.SystemClock
+import android.os.Build
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
 import androidx.core.view.NestedScrollingChild
 import androidx.core.view.ViewCompat
@@ -53,11 +55,6 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     }
   var animateIn: Boolean = true
   var animateContentHeight: Boolean = true
-    set(value) {
-      if (field == value) return
-      field = value
-      reconcileNativeContentHeightTracking()
-    }
   var positionEventsEnabled: Boolean = false
   var dragEnabled: Boolean = true
     set(value) {
@@ -96,7 +93,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       refreshDetentsFromLayout()
       requestLayout()
     }
-  var jsContentHeight: Float = 0f
+  var jsContentHeight: Float = -1f
     private set
 
   /** React Native reports layout in dp; the engine stores pixels. */
@@ -104,7 +101,6 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     val px = dp(dpValue)
     val previous = jsContentHeight
     jsContentHeight = px
-    reconcileNativeContentHeightTracking()
     if (abs(previous - px) > 0.5f) {
       if (shouldDeferContentHeightRefresh()) {
         scheduleDeferredContentHeightRefresh()
@@ -141,6 +137,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private var isPanning = false
   private var lastAppliedMaxDetentHeight = Float.NaN
   private var activeSpring: CriticalSpring? = null
+  private var activeSpringAnimator: ValueAnimator? = null
   private var activeSpringTargetIndex = 0
   private var activeSpringEmitsSettle = false
   private var scrimOpacities: List<Float> = listOf(1f)
@@ -156,59 +153,10 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private var nestedScrollChild: View? = null
   private var panCoordinationIsSheet = true
   private var isContentHeightRefreshDeferred = false
-  private var deferredContentHeightFramesElapsed = 0
-  private var isNativeContentHeightTracking = false
-  private var lastTrackedNativeContentHeight = 0f
   private var lastObservedSheetEditorFocus = false
   private var lastObservedSheetContainsEditor = false
 
-  private val springChoreographer = android.view.Choreographer.getInstance()
-  private val springFrameCallback = object : android.view.Choreographer.FrameCallback {
-    override fun doFrame(frameTimeNanos: Long) {
-      val spring = activeSpring ?: return
-      val now = SystemClock.uptimeMillis()
-      val ty = spring.valueAt(now)
-      applyTranslation(ty)
-      emitPosition(ty)
-      if (now >= spring.startTimeMs + spring.durationMs) {
-        finishSpring()
-      } else {
-        springChoreographer.postFrameCallback(this)
-      }
-    }
-  }
-
-  private val deferredContentHeightFrameCallback =
-    object : android.view.Choreographer.FrameCallback {
-      override fun doFrame(frameTimeNanos: Long) {
-        if (!isContentHeightRefreshDeferred) return
-        deferredContentHeightFramesElapsed += 1
-        if (deferredContentHeightFramesElapsed >= CONTENT_HEIGHT_REFRESH_DELAY_FRAMES) {
-          flushDeferredContentHeightRefresh()
-        } else {
-          springChoreographer.postFrameCallback(this)
-        }
-      }
-    }
-
-  private val nativeContentHeightFrameCallback =
-    object : android.view.Choreographer.FrameCallback {
-      override fun doFrame(frameTimeNanos: Long) {
-        if (!shouldTrackNativeContentHeight()) {
-          stopNativeContentHeightTracking()
-          return
-        }
-        val measured = measuredNativeContentHeight()
-        if (measured > 0.5f && abs(measured - lastTrackedNativeContentHeight) > 0.5f) {
-          lastTrackedNativeContentHeight = measured
-          refreshDetentsFromLayout()
-          requestLayout()
-        }
-        if (isNativeContentHeightTracking) {
-          springChoreographer.postFrameCallback(this)
-        }
-      }
-    }
+  private val deferredContentHeightRunnable = Runnable { flushDeferredContentHeightRefresh() }
 
   init {
     clipChildren = false
@@ -275,8 +223,6 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       raw.map { spec ->
         if (spec.kind == DetentKind.POINTS) spec.copy(value = dp(spec.value)) else spec
       }
-    lastTrackedNativeContentHeight = 0f
-    reconcileNativeContentHeightTracking()
     refreshDetentsFromLayout()
   }
 
@@ -302,14 +248,10 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   fun addSheetChild(child: View, index: Int) {
     val insertAt = min(max(index + 1, 1), sheetContainer.childCount)
     sheetContainer.addView(child, insertAt)
-    lastTrackedNativeContentHeight = 0f
-    reconcileNativeContentHeightTracking()
   }
 
   fun removeSheetChild(child: View) {
     sheetContainer.removeView(child)
-    lastTrackedNativeContentHeight = 0f
-    reconcileNativeContentHeightTracking()
   }
 
   val sheetChildCount: Int
@@ -318,11 +260,6 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   fun getSheetChildAt(index: Int): View? {
     val actual = index + 1
     return if (actual in 0 until sheetContainer.childCount) sheetContainer.getChildAt(actual) else null
-  }
-
-  override fun onAttachedToWindow() {
-    super.onAttachedToWindow()
-    reconcileNativeContentHeightTracking()
   }
 
   override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
@@ -392,7 +329,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
 
   private fun validContentHeight(): Float? {
     val raw =
-      if (jsContentHeight > 0.5f) jsContentHeight
+      if (jsContentHeight >= 0f) jsContentHeight
       else {
         val measured = measuredNativeContentHeight()
         if (measured > 0.5f) measured else return null
@@ -416,8 +353,11 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       val height = when (spec.kind) {
         DetentKind.POINTS -> spec.value
         DetentKind.PERCENTAGE -> maxHeight * spec.value
-        DetentKind.CONTENT ->
-          measured ?: unresolvedContent(index, maxHeight)
+        DetentKind.CONTENT -> {
+          val lowerBound = resolved.lastOrNull()?.height ?: 0f
+          val upperBound = max(lowerBound, unresolvedContent(index, maxHeight))
+          (measured ?: upperBound).coerceIn(lowerBound, upperBound)
+        }
       }
       val resolvedHeight = min(max(0f, height), maxHeight)
       if (resolved.isNotEmpty() && resolvedHeight < resolved.last().height) return null
@@ -473,15 +413,14 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private fun scheduleDeferredContentHeightRefresh() {
     if (isContentHeightRefreshDeferred) return
     isContentHeightRefreshDeferred = true
-    deferredContentHeightFramesElapsed = 0
-    springChoreographer.postFrameCallback(deferredContentHeightFrameCallback)
+    removeCallbacks(deferredContentHeightRunnable)
+    postDelayed(deferredContentHeightRunnable, CONTENT_HEIGHT_REFRESH_DELAY_MS)
   }
 
   private fun cancelDeferredContentHeightRefresh(): Boolean {
     val wasDeferred = isContentHeightRefreshDeferred
     isContentHeightRefreshDeferred = false
-    deferredContentHeightFramesElapsed = 0
-    springChoreographer.removeFrameCallback(deferredContentHeightFrameCallback)
+    removeCallbacks(deferredContentHeightRunnable)
     return wasDeferred
   }
 
@@ -489,32 +428,6 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     if (!cancelDeferredContentHeightRefresh()) return
     refreshDetentsFromLayout()
     requestLayout()
-  }
-
-  private fun shouldTrackNativeContentHeight(): Boolean =
-    isAttachedToWindow &&
-      jsContentHeight <= 0.5f &&
-      rawDetentSpecs.any { it.kind == DetentKind.CONTENT }
-
-  private fun reconcileNativeContentHeightTracking() {
-    if (shouldTrackNativeContentHeight()) {
-      startNativeContentHeightTracking()
-    } else {
-      stopNativeContentHeightTracking()
-    }
-  }
-
-  private fun startNativeContentHeightTracking() {
-    if (isNativeContentHeightTracking) return
-    isNativeContentHeightTracking = true
-    springChoreographer.postFrameCallback(nativeContentHeightFrameCallback)
-  }
-
-  private fun stopNativeContentHeightTracking() {
-    if (!isNativeContentHeightTracking && lastTrackedNativeContentHeight == 0f) return
-    isNativeContentHeightTracking = false
-    lastTrackedNativeContentHeight = 0f
-    springChoreographer.removeFrameCallback(nativeContentHeightFrameCallback)
   }
 
   private fun refreshDetentsFromLayout() {
@@ -541,22 +454,25 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       if (activeSpring != null) {
         val shouldPinScrim = scrimIsAtTargetOpacity(targetIndex)
         val emitSettle = activeSpringEmitsSettle
+        val springVelocity = activeSpring?.velocityAtElapsed(activeSpringElapsedSeconds()) ?: 0f
         val visualTy = cancelActiveSpring()
         val visible = previousMax - visualTy
         applyTranslation(min(max(newMax - visible, 0f), newMax))
         emitPosition()
         snapToIndex(
           targetIndex,
-          0f,
+          springVelocity,
           emitIndexChange = false,
           emitSettle = emitSettle,
           pinScrim = shouldPinScrim,
+          preserveVelocity = true,
         )
       } else {
         val visible = previousMax - translationYInternal
         val targetHeight = detentAt(targetIndex).height
         val shouldAnimate =
           animateContentHeight &&
+            systemAnimatorsEnabled() &&
             rawDetentSpecs.getOrNull(targetIndex)?.kind == DetentKind.CONTENT
         if (abs(targetHeight - visible) <= 0.5f || !shouldAnimate) {
           applyTranslation(targetTy)
@@ -620,6 +536,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     emitIndexChange: Boolean = true,
     emitSettle: Boolean = true,
     pinScrim: Boolean = false,
+    preserveVelocity: Boolean = false,
   ) {
     if (index !in detentSpecs.indices) return
     targetIndex = index
@@ -631,24 +548,49 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     }
     val currentTy = if (activeSpring != null) cancelActiveSpring() else translationYInternal
     val targetTy = translationY(index)
+    if (!systemAnimatorsEnabled()) {
+      applyTranslation(targetTy)
+      emitPosition(targetTy)
+      if (emitIndexChange) listener?.emitIndexChange(index)
+      if (emitSettle) listener?.emitSettle(index)
+      return
+    }
     val distance = targetTy - currentTy
-    val ratio = if (distance != 0f) (velocity / distance).coerceIn(-5f, 5f) else 0f
-    val duration = 450L
-    val omega = 8f / (duration / 1000f)
+    val initialVelocity =
+      if (preserveVelocity) {
+        velocity
+      } else {
+        val ratio = if (distance != 0f) (velocity / distance).coerceIn(-5f, 5f) else 0f
+        ratio * distance
+      }
+    val omega = 8f / (SPRING_DURATION_MS / 1000f)
     activeSpringEmitsSettle = emitSettle
     activeSpringTargetIndex = index
     activeSpring = CriticalSpring(
       from = currentTy,
       target = targetTy,
-      v0 = ratio * distance,
+      v0 = initialVelocity,
       omega = omega,
-      startTimeMs = SystemClock.uptimeMillis(),
-      durationMs = duration,
+      durationMs = SPRING_DURATION_MS,
     )
     applyTranslation(currentTy)
     updateScrim()
-    springChoreographer.postFrameCallback(springFrameCallback)
+    val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+      duration = SPRING_DURATION_MS
+      interpolator = LinearInterpolator()
+      addUpdateListener { runningAnimator ->
+        if (activeSpringAnimator !== runningAnimator) return@addUpdateListener
+        val spring = activeSpring ?: return@addUpdateListener
+        val elapsed = (runningAnimator.animatedValue as Float) * SPRING_DURATION_SECONDS
+        val ty = spring.valueAtElapsed(elapsed)
+        applyTranslation(ty)
+        emitPosition(ty)
+        if (runningAnimator.animatedFraction >= 1f) finishSpring()
+      }
+    }
+    activeSpringAnimator = animator
     if (emitIndexChange) listener?.emitIndexChange(index)
+    animator.start()
   }
 
   private fun finishSpring() {
@@ -657,7 +599,8 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     val emitSettle = activeSpringEmitsSettle
     activeSpring = null
     activeSpringEmitsSettle = false
-    springChoreographer.removeFrameCallback(springFrameCallback)
+    activeSpringAnimator?.removeAllUpdateListeners()
+    activeSpringAnimator = null
     applyTranslation(translationY(index))
     emitPosition()
     pinScrimToTarget = false
@@ -665,13 +608,21 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   }
 
   private fun cancelActiveSpring(): Float {
-    val visual = activeSpring?.valueAt(SystemClock.uptimeMillis()) ?: translationYInternal
+    val visual = activeSpring?.valueAtElapsed(activeSpringElapsedSeconds()) ?: translationYInternal
     activeSpring = null
     activeSpringEmitsSettle = false
-    springChoreographer.removeFrameCallback(springFrameCallback)
+    activeSpringAnimator?.removeAllUpdateListeners()
+    activeSpringAnimator?.cancel()
+    activeSpringAnimator = null
     applyTranslation(visual)
     return visual
   }
+
+  private fun activeSpringElapsedSeconds(): Float =
+    ((activeSpringAnimator?.animatedValue as? Float) ?: 0f) * SPRING_DURATION_SECONDS
+
+  private fun systemAnimatorsEnabled(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ValueAnimator.areAnimatorsEnabled()
 
   private fun visibleSheetHeight(): Float = max(0f, sheetContainerHeight() - translationYInternal)
 
@@ -870,11 +821,12 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
     cancelDeferredContentHeightRefresh()
-    stopNativeContentHeightTracking()
-    springChoreographer.removeFrameCallback(springFrameCallback)
+    if (activeSpring != null) cancelActiveSpring()
   }
 
   private companion object {
-    const val CONTENT_HEIGHT_REFRESH_DELAY_FRAMES = 3
+    const val CONTENT_HEIGHT_REFRESH_DELAY_MS = 50L
+    const val SPRING_DURATION_MS = 450L
+    const val SPRING_DURATION_SECONDS = SPRING_DURATION_MS / 1000f
   }
 }

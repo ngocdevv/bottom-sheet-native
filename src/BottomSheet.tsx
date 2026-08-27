@@ -1,13 +1,13 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentType,
   type ReactNode,
 } from 'react';
 import {
-  Platform,
   StyleSheet,
   View,
   processColor,
@@ -25,16 +25,23 @@ import type {
 import NativeBottomSheetView from './NativeBottomSheetView';
 import {
   type Detent,
+  type ContentHeightAnimation,
   type KeyboardBehavior,
   applyDismissible,
+  hasContentDetent,
   isNormalizedDetentClosed,
   KEYBOARD_BEHAVIOR_LEVEL,
   normalizeDetent,
-  shouldMeasureContentHeightInJS,
+  resolveContentHeightAnimation,
   validateIndex,
 } from './bottomSheetUtils';
 
-export type { Detent, DetentValue, KeyboardBehavior } from './bottomSheetUtils';
+export type {
+  ContentHeightAnimation,
+  Detent,
+  DetentValue,
+  KeyboardBehavior,
+} from './bottomSheetUtils';
 export { programmatic } from './bottomSheetUtils';
 export type { KeyboardChangeEventData, PositionChangeEventData } from './NativeBottomSheet.types';
 
@@ -59,6 +66,7 @@ const DEFAULT_SCROLLABLE_NEGOTIATION = {
 } as const satisfies Exclude<ScrollableNegotiation, string>;
 
 const DEFAULT_MODAL_SCRIM = 'rgba(0,0,0,0.45)';
+const DEFAULT_DETENTS: Detent[] = [0, 'content'];
 
 /** RN View treats 8-digit hex as RRGGBBAA; product colors are often AARRGGBB. */
 function cssOverlayColor(color: string | undefined): string {
@@ -80,9 +88,14 @@ export interface BottomSheetProps {
   index: number;
   animateIn?: boolean;
   /**
-   * Native spring for discrete content-height changes. Set false when a
-   * UI-thread/Reanimated viewport already animates its own height; the native
-   * engine then tracks the mounted content frame without per-frame JS work.
+   * How a selected `'content'` detent responds to a discrete layout change.
+   * The default `'spring'` animates only the native sheet transform; `'none'`
+   * applies the new height immediately.
+   */
+  contentHeightAnimation?: ContentHeightAnimation;
+  /**
+   * @deprecated Use `contentHeightAnimation="spring" | "none"` instead.
+   * This prop no longer enables per-frame native layout polling.
    */
   animateContentHeight?: boolean;
   /** Enables the native sheet pan gesture. Disable while child gestures own the surface. */
@@ -128,10 +141,11 @@ export const BottomSheet = (props: BottomSheetProps) => {
     children,
     surface,
     style,
-    detents = [0, 'content'],
+    detents = DEFAULT_DETENTS,
     index,
     animateIn = true,
-    animateContentHeight = true,
+    animateContentHeight,
+    contentHeightAnimation,
     dragEnabled = true,
     extendUnderStatusBar = false,
     onIndexChange,
@@ -163,14 +177,24 @@ export const BottomSheet = (props: BottomSheetProps) => {
       ? resolvedScrollableNegotiation
       : resolvedScrollableNegotiation.collapse;
   const usesNativeOverlay = modal && nativeOverlay;
+  const resolvedAnimateContentHeight = resolveContentHeightAnimation(
+    contentHeightAnimation,
+    animateContentHeight
+  );
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
   validateIndex(index, detents.length);
-  const normalizedDetents = applyDismissible(detents.map(normalizeDetent), dismissible);
+  const normalizedDetents = useMemo(
+    () => applyDismissible(detents.map(normalizeDetent), dismissible),
+    [detents, dismissible]
+  );
   const selectedNormalizedDetent = normalizedDetents[index]!;
   const isSheetClosed = isNormalizedDetentClosed(selectedNormalizedDetent);
-  const resolvedScrimOpacities =
-    scrimOpacities ?? normalizedDetents.map((detent) => (isNormalizedDetentClosed(detent) ? 0 : 1));
+  const defaultScrimOpacities = useMemo(
+    () => normalizedDetents.map((detent) => (isNormalizedDetentClosed(detent) ? 0 : 1)),
+    [normalizedDetents]
+  );
+  const resolvedScrimOpacities = scrimOpacities ?? defaultScrimOpacities;
   const resolvedScrimColor = cssOverlayColor(
     scrimColor ?? (modal ? DEFAULT_MODAL_SCRIM : undefined)
   );
@@ -201,18 +225,42 @@ export const BottomSheet = (props: BottomSheetProps) => {
       >
   );
 
-  const [contentHeight, setContentHeight] = useState(0);
+  const [contentHeight, setContentHeight] = useState(-1);
+  const contentHeightRef = useRef(-1);
   const contentWrapperRef = useRef<View>(null);
-  const measureContentHeightInJS = shouldMeasureContentHeightInJS(
-    Platform.OS,
-    animateContentHeight
-  );
-  const updateContentHeight = useCallback((next: number) => {
-    setContentHeight((current) => {
-      if (next < 1 && current > 1) return current;
-      return Math.abs(current - next) < 0.5 ? current : next;
-    });
+  const pendingZeroFrameRef = useRef<number | null>(null);
+  const measureContentHeight = hasContentDetent(normalizedDetents);
+  const commitContentHeight = useCallback((next: number) => {
+    const normalized = Number.isFinite(next) ? Math.max(0, next) : -1;
+    if (Math.abs(contentHeightRef.current - normalized) < 0.5) return;
+    contentHeightRef.current = normalized;
+    setContentHeight(normalized);
   }, []);
+  const updateContentHeight = useCallback(
+    (next: number) => {
+      const normalized = Number.isFinite(next) ? Math.max(0, next) : -1;
+
+      // Page swaps can briefly report zero between unmount and mount. Confirm
+      // it one frame later so a transient layout never collapses the sheet.
+      if (normalized < 0.5 && contentHeightRef.current > 0.5) {
+        if (pendingZeroFrameRef.current != null) return;
+        pendingZeroFrameRef.current = requestAnimationFrame(() => {
+          pendingZeroFrameRef.current = null;
+          contentWrapperRef.current?.measure((_x, _y, _width, measuredHeight) => {
+            commitContentHeight(measuredHeight);
+          });
+        });
+        return;
+      }
+
+      if (pendingZeroFrameRef.current != null) {
+        cancelAnimationFrame(pendingZeroFrameRef.current);
+        pendingZeroFrameRef.current = null;
+      }
+      commitContentHeight(normalized);
+    },
+    [commitContentHeight]
+  );
   const handleContentLayout = useCallback(
     (event: { nativeEvent: { layout: { height: number } } }) => {
       updateContentHeight(event.nativeEvent.layout.height);
@@ -220,16 +268,22 @@ export const BottomSheet = (props: BottomSheetProps) => {
     [updateContentHeight]
   );
 
-  // `animateContentHeight` is normally static, but re-measure once if a caller
-  // switches back to native-owned animation after using the UI-thread tracking
-  // mode. Attaching onLayout alone does not guarantee a new event when the
-  // content's geometry is already settled.
+  // Attaching onLayout does not guarantee a fresh event when a caller adds a
+  // content detent after the content has already settled, so measure once.
   useEffect(() => {
-    if (!measureContentHeightInJS) return;
+    if (!measureContentHeight) return;
     contentWrapperRef.current?.measure((_x, _y, _width, height) => {
       updateContentHeight(height);
     });
-  }, [measureContentHeightInJS, updateContentHeight]);
+  }, [measureContentHeight, updateContentHeight]);
+  useEffect(
+    () => () => {
+      if (pendingZeroFrameRef.current != null) {
+        cancelAnimationFrame(pendingZeroFrameRef.current);
+      }
+    },
+    []
+  );
   const resolvedCornerRadius = sheetCornerRadius ?? 28;
 
   const sheet = (
@@ -237,12 +291,9 @@ export const BottomSheet = (props: BottomSheetProps) => {
       pointerEvents={modal && isSheetClosed ? 'none' : 'box-none'}
       style={StyleSheet.absoluteFill}>
       <NativeView
-        animateContentHeight={animateContentHeight}
+        animateContentHeight={resolvedAnimateContentHeight}
         animateIn={animateIn}
-        // UI-thread page-height animations must not round-trip through
-        // onLayout -> React state -> a native prop on every frame. A zero value
-        // asks the native engine to track the mounted content view directly.
-        contentHeight={measureContentHeightInJS ? contentHeight : 0}
+        contentHeight={measureContentHeight ? contentHeight : -1}
         detents={normalizedDetents}
         dismissible={dismissible}
         dragEnabled={dragEnabled}
@@ -306,7 +357,7 @@ export const BottomSheet = (props: BottomSheetProps) => {
         <View
           ref={contentWrapperRef}
           collapsable={false}
-          onLayout={measureContentHeightInJS ? handleContentLayout : undefined}
+          onLayout={measureContentHeight ? handleContentLayout : undefined}
           style={styles.contentWrapper}>
           {children}
         </View>

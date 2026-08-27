@@ -1,6 +1,7 @@
 export { BottomSheet } from './BottomSheet';
 export type {
   BottomSheetProps,
+  ContentHeightAnimation,
   PositionChangeEventData,
   ScrollableNegotiation,
   ScrollableNegotiationMode,
