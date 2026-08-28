@@ -17,6 +17,7 @@ import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
 import androidx.core.view.NestedScrollingChild
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 import kotlin.math.max
@@ -50,6 +51,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   var listener: Listener? = null
   var modal: Boolean = false
     set(value) {
+      if (field == value) return
       field = value
       updateScrim()
     }
@@ -58,6 +60,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   var positionEventsEnabled: Boolean = false
   var dragEnabled: Boolean = true
     set(value) {
+      if (field == value) return
       field = value
       if (!value) {
         isPanning = false
@@ -162,6 +165,65 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private var isContentHeightRefreshDeferred = false
   private var lastObservedSheetEditorFocus = false
   private var lastObservedSheetContainsEditor = false
+  private var imeAnimationRunning = false
+  private var imeAnimationStartInset = 0f
+  private var pendingImeInset = 0f
+
+  /**
+   * API 30+ dispatches intermediate IME insets while the keyboard animates.
+   * Applying every intermediate value would re-resolve the content detent and
+   * restart its spring on every frame. Resolve the final bound once at start,
+   * then reconcile with the delivered final inset when the IME settles.
+   */
+  private val imeAnimationCallback =
+    object :
+      WindowInsetsAnimationCompat.Callback(
+        WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE,
+      ) {
+      override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+        super.onPrepare(animation)
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+        imeAnimationRunning = true
+        imeAnimationStartInset = keyboardInset
+        pendingImeInset = keyboardInset
+      }
+
+      override fun onStart(
+        animation: WindowInsetsAnimationCompat,
+        bounds: WindowInsetsAnimationCompat.BoundsCompat,
+      ): WindowInsetsAnimationCompat.BoundsCompat {
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+          val lower = bounds.lowerBound.bottom.toFloat()
+          val upper = bounds.upperBound.bottom.toFloat()
+          val target =
+            if (abs(imeAnimationStartInset - lower) <= abs(imeAnimationStartInset - upper)) {
+              upper
+            } else {
+              lower
+            }
+          pendingImeInset = target
+          keyboardInset = target
+        }
+        return bounds
+      }
+
+      override fun onProgress(
+        insets: WindowInsetsCompat,
+        runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+      ): WindowInsetsCompat {
+        if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
+          pendingImeInset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+        }
+        return insets
+      }
+
+      override fun onEnd(animation: WindowInsetsAnimationCompat) {
+        super.onEnd(animation)
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+        imeAnimationRunning = false
+        keyboardInset = pendingImeInset
+      }
+    }
 
   private val deferredContentHeightRunnable = Runnable { flushDeferredContentHeightRefresh() }
 
@@ -195,9 +257,12 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     sheetBackground.outlineProvider = topCornerOutline
     sheetBackground.clipToOutline = true
     ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
-      keyboardInset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+      val inset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+      pendingImeInset = inset
+      if (!imeAnimationRunning) keyboardInset = inset
       insets
     }
+    ViewCompat.setWindowInsetsAnimationCallback(this, imeAnimationCallback)
     ViewCompat.requestApplyInsets(this)
   }
 
@@ -221,15 +286,19 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   }
 
   fun setScrimOpacities(values: List<Float>) {
-    scrimOpacities = if (values.isEmpty()) listOf(1f) else values
+    val normalized = if (values.isEmpty()) listOf(1f) else values
+    if (normalized == scrimOpacities) return
+    scrimOpacities = normalized
     updateScrim()
   }
 
   fun setDetents(raw: List<RawDetentSpec>) {
-    rawDetentSpecs =
+    val normalized =
       raw.map { spec ->
         if (spec.kind == DetentKind.POINTS) spec.copy(value = dp(spec.value)) else spec
       }
+    if (normalized == rawDetentSpecs) return
+    rawDetentSpecs = normalized
     refreshDetentsFromLayout()
   }
 

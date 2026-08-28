@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,6 +68,21 @@ const DEFAULT_SCROLLABLE_NEGOTIATION = {
 
 const DEFAULT_MODAL_SCRIM = 'rgba(0,0,0,0.45)';
 const DEFAULT_DETENTS: Detent[] = [0, 'content'];
+
+/**
+ * Native event props should not be replaced just because a caller used an
+ * inline callback. Fabric treats a new function as a prop update, and that
+ * update can otherwise land on the main thread while the sheet is moving.
+ */
+function useLatestCallback<TArgs extends unknown[]>(
+  callback: ((...args: TArgs) => void) | undefined
+): (...args: TArgs) => void {
+  const callbackRef = useRef(callback);
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+  return useCallback((...args: TArgs) => callbackRef.current?.(...args), []);
+}
 
 /** RN View treats 8-digit hex as RRGGBBAA; product colors are often AARRGGBB. */
 function cssOverlayColor(color: string | undefined): string {
@@ -199,23 +215,27 @@ export const BottomSheet = (props: BottomSheetProps) => {
     scrimColor ?? (modal ? DEFAULT_MODAL_SCRIM : undefined)
   );
 
+  const notifyIndexChange = useLatestCallback(onIndexChange);
+  const notifySettle = useLatestCallback(onSettle);
+  const notifyPositionChange = useLatestCallback(onPositionChange);
+  const notifyKeyboardChange = useLatestCallback(onKeyboardChange);
   const handleIndexChange = useCallback(
     (event: NativeSyntheticEvent<{ index: number }>) => {
-      onIndexChange?.(event.nativeEvent.index);
+      notifyIndexChange(event.nativeEvent.index);
     },
-    [onIndexChange]
+    [notifyIndexChange]
   );
   const handleSettle = useCallback(
     (event: NativeSyntheticEvent<{ index: number }>) => {
-      onSettle?.(event.nativeEvent.index);
+      notifySettle(event.nativeEvent.index);
     },
-    [onSettle]
+    [notifySettle]
   );
   const handleKeyboardChange = useCallback(
     (event: NativeSyntheticEvent<{ height: number }>) => {
-      onKeyboardChange?.(event.nativeEvent.height);
+      notifyKeyboardChange(event.nativeEvent.height);
     },
-    [onKeyboardChange]
+    [notifyKeyboardChange]
   );
 
   const [NativeView] = useState(
@@ -305,7 +325,7 @@ export const BottomSheet = (props: BottomSheetProps) => {
         nativeOverlay={usesNativeOverlay}
         onIndexChange={handleIndexChange}
         onKeyboardChange={handleKeyboardChange}
-        onPositionChange={onPositionChange}
+        onPositionChange={onPositionChange == null ? undefined : notifyPositionChange}
         onSettle={handleSettle}
         pointerEvents={modal ? (isSheetClosed ? 'none' : 'auto') : 'box-none'}
         positionEventsEnabled={onPositionChange != null}

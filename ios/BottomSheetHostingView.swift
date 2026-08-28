@@ -11,13 +11,13 @@ protocol BottomSheetHostingViewDelegate: AnyObject {
   func bottomSheetHostingView(_ view: BottomSheetHostingView, didChangeKeyboardHeight height: CGFloat)
 }
 
-enum DetentKind {
+enum DetentKind: Equatable {
   case points
   case percentage
   case content
 }
 
-struct RawDetentSpec {
+struct RawDetentSpec: Equatable {
   let value: CGFloat
   let kind: DetentKind
   let programmatic: Bool
@@ -89,7 +89,10 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   weak var eventDelegate: BottomSheetHostingViewDelegate?
 
   var modal = false {
-    didSet { updateScrim() }
+    didSet {
+      guard modal != oldValue else { return }
+      updateScrim()
+    }
   }
 
   var scrimColor: UIColor = UIColor.black.withAlphaComponent(0.45) {
@@ -363,12 +366,15 @@ final class BottomSheetHostingView: UIView, UIGestureRecognizerDelegate, CAAnima
   }
 
   func setDetents(_ raw: [RawDetentSpec]) {
+    guard raw != rawDetentSpecs else { return }
     rawDetentSpecs = raw
     refreshDetentsFromLayout()
   }
 
   func setScrimOpacities(_ values: [CGFloat]) {
-    scrimOpacities = values.isEmpty ? [1] : values
+    let normalized = values.isEmpty ? [1] : values
+    guard normalized != scrimOpacities else { return }
+    scrimOpacities = normalized
     updateScrim()
   }
 
