@@ -304,6 +304,10 @@ being applied. A stable, genuinely empty layout still resolves to height `0`.
 
 `useKeyboardInset()` returns keyboard height in pt/dp for custom pinned/docked content.
 
+On Android, intermediate `WindowInsets` values from the system IME animation are
+coalesced into one final detent target. The sheet starts a single native spring
+with the keyboard instead of restarting layout and animation on every IME frame.
+
 ## Non-dismissible sheets
 
 ```tsx

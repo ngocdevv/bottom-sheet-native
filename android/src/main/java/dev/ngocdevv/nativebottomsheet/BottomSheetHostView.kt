@@ -17,6 +17,7 @@ import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
 import androidx.core.view.NestedScrollingChild
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 import kotlin.math.max
@@ -50,6 +51,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   var listener: Listener? = null
   var modal: Boolean = false
     set(value) {
+      if (field == value) return
       field = value
       updateScrim()
     }
@@ -58,6 +60,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   var positionEventsEnabled: Boolean = false
   var dragEnabled: Boolean = true
     set(value) {
+      if (field == value) return
       field = value
       if (!value) {
         isPanning = false
@@ -143,6 +146,13 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private var scrimOpacities: List<Float> = listOf(1f)
   private var scrimPinnedFull = false
   private var pinScrimToTarget = false
+  // Keep the overlay visually continuous when a content detent resolves and
+  // retargets a spring already in flight. The panel re-anchors to its current
+  // visible height; this offset does the same for scrim alpha and decays as
+  // the retargeted spring approaches its destination.
+  private var scrimContinuityOffset = 0f
+  private var scrimContinuityStartTy = 0f
+  private var scrimContinuityTargetTy = 0f
   private var panStartingIndex: Int? = null
   private var activeDragRange: Pair<Float, Float>? = null
   private var translationYInternal = 0f
@@ -155,6 +165,65 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   private var isContentHeightRefreshDeferred = false
   private var lastObservedSheetEditorFocus = false
   private var lastObservedSheetContainsEditor = false
+  private var imeAnimationRunning = false
+  private var imeAnimationStartInset = 0f
+  private var pendingImeInset = 0f
+
+  /**
+   * API 30+ dispatches intermediate IME insets while the keyboard animates.
+   * Applying every intermediate value would re-resolve the content detent and
+   * restart its spring on every frame. Resolve the final bound once at start,
+   * then reconcile with the delivered final inset when the IME settles.
+   */
+  private val imeAnimationCallback =
+    object :
+      WindowInsetsAnimationCompat.Callback(
+        WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE,
+      ) {
+      override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+        super.onPrepare(animation)
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+        imeAnimationRunning = true
+        imeAnimationStartInset = keyboardInset
+        pendingImeInset = keyboardInset
+      }
+
+      override fun onStart(
+        animation: WindowInsetsAnimationCompat,
+        bounds: WindowInsetsAnimationCompat.BoundsCompat,
+      ): WindowInsetsAnimationCompat.BoundsCompat {
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+          val lower = bounds.lowerBound.bottom.toFloat()
+          val upper = bounds.upperBound.bottom.toFloat()
+          val target =
+            if (abs(imeAnimationStartInset - lower) <= abs(imeAnimationStartInset - upper)) {
+              upper
+            } else {
+              lower
+            }
+          pendingImeInset = target
+          keyboardInset = target
+        }
+        return bounds
+      }
+
+      override fun onProgress(
+        insets: WindowInsetsCompat,
+        runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+      ): WindowInsetsCompat {
+        if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
+          pendingImeInset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+        }
+        return insets
+      }
+
+      override fun onEnd(animation: WindowInsetsAnimationCompat) {
+        super.onEnd(animation)
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+        imeAnimationRunning = false
+        keyboardInset = pendingImeInset
+      }
+    }
 
   private val deferredContentHeightRunnable = Runnable { flushDeferredContentHeightRefresh() }
 
@@ -188,9 +257,12 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     sheetBackground.outlineProvider = topCornerOutline
     sheetBackground.clipToOutline = true
     ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
-      keyboardInset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+      val inset = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom.toFloat()
+      pendingImeInset = inset
+      if (!imeAnimationRunning) keyboardInset = inset
       insets
     }
+    ViewCompat.setWindowInsetsAnimationCallback(this, imeAnimationCallback)
     ViewCompat.requestApplyInsets(this)
   }
 
@@ -214,15 +286,19 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
   }
 
   fun setScrimOpacities(values: List<Float>) {
-    scrimOpacities = if (values.isEmpty()) listOf(1f) else values
+    val normalized = if (values.isEmpty()) listOf(1f) else values
+    if (normalized == scrimOpacities) return
+    scrimOpacities = normalized
     updateScrim()
   }
 
   fun setDetents(raw: List<RawDetentSpec>) {
-    rawDetentSpecs =
+    val normalized =
       raw.map { spec ->
         if (spec.kind == DetentKind.POINTS) spec.copy(value = dp(spec.value)) else spec
       }
+    if (normalized == rawDetentSpecs) return
+    rawDetentSpecs = normalized
     refreshDetentsFromLayout()
   }
 
@@ -455,6 +531,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
         val shouldPinScrim = scrimIsAtTargetOpacity(targetIndex)
         val emitSettle = activeSpringEmitsSettle
         val springVelocity = activeSpring?.velocityAtElapsed(activeSpringElapsedSeconds()) ?: 0f
+        val visualScrimAlpha = scrimView.alpha
         val visualTy = cancelActiveSpring()
         val visible = previousMax - visualTy
         applyTranslation(min(max(newMax - visible, 0f), newMax))
@@ -466,6 +543,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
           emitSettle = emitSettle,
           pinScrim = shouldPinScrim,
           preserveVelocity = true,
+          preservedScrimAlpha = visualScrimAlpha,
         )
       } else {
         val visible = previousMax - translationYInternal
@@ -537,8 +615,10 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     emitSettle: Boolean = true,
     pinScrim: Boolean = false,
     preserveVelocity: Boolean = false,
+    preservedScrimAlpha: Float? = null,
   ) {
     if (index !in detentSpecs.indices) return
+    val carriedScrimAlpha = preservedScrimAlpha ?: scrimView.alpha
     targetIndex = index
     if (pinScrim) {
       pinScrimToTarget = true
@@ -549,6 +629,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     val currentTy = if (activeSpring != null) cancelActiveSpring() else translationYInternal
     val targetTy = translationY(index)
     if (!systemAnimatorsEnabled()) {
+      clearScrimContinuity()
       applyTranslation(targetTy)
       emitPosition(targetTy)
       if (emitIndexChange) listener?.emitIndexChange(index)
@@ -572,6 +653,12 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       v0 = initialVelocity,
       omega = omega,
       durationMs = SPRING_DURATION_MS,
+    )
+    configureScrimContinuity(
+      startTy = currentTy,
+      targetTy = targetTy,
+      mappedStartAlpha = interpolatedScrimOpacity(currentTy),
+      preservedStartAlpha = carriedScrimAlpha,
     )
     applyTranslation(currentTy)
     updateScrim()
@@ -601,6 +688,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     activeSpringEmitsSettle = false
     activeSpringAnimator?.removeAllUpdateListeners()
     activeSpringAnimator = null
+    clearScrimContinuity()
     applyTranslation(translationY(index))
     emitPosition()
     pinScrimToTarget = false
@@ -760,6 +848,7 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     if (!modal) {
       scrimView.alpha = 0f
       scrimView.visibility = GONE
+      clearScrimContinuity()
       return
     }
     if (pinScrimToTarget || scrimPinnedFull) {
@@ -768,7 +857,10 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
       scrimView.visibility = if (pinned <= 0.001f) GONE else VISIBLE
       return
     }
-    val alpha = interpolatedScrimOpacity()
+    val alpha = continuousScrimOpacity(
+      mappedAlpha = interpolatedScrimOpacity(),
+      translationY = translationYInternal,
+    )
     scrimView.alpha = alpha
     scrimView.visibility = if (alpha <= 0.001f) GONE else VISIBLE
   }
@@ -781,8 +873,8 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     return scrimOpacities[index.coerceIn(0, scrimOpacities.lastIndex)].coerceIn(0f, 1f)
   }
 
-  private fun interpolatedScrimOpacity(): Float {
-    val fraction = fractionalIndex(sheetContainerHeight() - translationYInternal)
+  private fun interpolatedScrimOpacity(translationY: Float = translationYInternal): Float {
+    val fraction = fractionalIndex(sheetContainerHeight() - translationY)
     if (scrimOpacities.isEmpty()) return 1f
     if (scrimOpacities.size == 1) return scrimOpacities[0].coerceIn(0f, 1f)
     val maxIndex = (scrimOpacities.size - 1).toFloat()
@@ -791,6 +883,37 @@ internal class BottomSheetHostView(context: Context) : FrameLayout(context) {
     val upper = min(lower + 1, scrimOpacities.lastIndex)
     val t = clamped - lower
     return (scrimOpacities[lower] * (1 - t) + scrimOpacities[upper] * t).coerceIn(0f, 1f)
+  }
+
+  private fun configureScrimContinuity(
+    startTy: Float,
+    targetTy: Float,
+    mappedStartAlpha: Float,
+    preservedStartAlpha: Float,
+  ) {
+    scrimContinuityStartTy = startTy
+    scrimContinuityTargetTy = targetTy
+    scrimContinuityOffset = preservedStartAlpha.coerceIn(0f, 1f) - mappedStartAlpha
+  }
+
+  private fun continuousScrimOpacity(
+    mappedAlpha: Float,
+    translationY: Float,
+  ): Float {
+    val distance = scrimContinuityTargetTy - scrimContinuityStartTy
+    val progress =
+      if (abs(distance) > 0.5f) {
+        ((translationY - scrimContinuityStartTy) / distance).coerceIn(0f, 1f)
+      } else {
+        activeSpringAnimator?.animatedFraction?.coerceIn(0f, 1f) ?: 0f
+      }
+    return (mappedAlpha + scrimContinuityOffset * (1f - progress)).coerceIn(0f, 1f)
+  }
+
+  private fun clearScrimContinuity() {
+    scrimContinuityOffset = 0f
+    scrimContinuityStartTy = 0f
+    scrimContinuityTargetTy = 0f
   }
 
   private fun fractionalIndex(height: Float): Float {
